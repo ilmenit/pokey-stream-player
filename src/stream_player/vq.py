@@ -106,8 +106,36 @@ def _kmeans(vectors, n_codes=256, n_iter=20, max_level=30):
     return codebook, assignments
 
 
+def _silence_threshold(max_level, vec_size):
+    """Determine per-sample threshold for near-silent vectors.
+
+    A vector is "near-silent" if ALL its samples are <= this threshold.
+    Scales with max_level (which depends on pokey_channels) and vec_size:
+      - Higher max_level → wider dynamic range → slightly higher threshold
+      - Larger vec_size  → more samples must ALL be low → threshold can be
+        a bit more generous since random chance of all-low is tiny.
+
+    Returns per-sample threshold (integer).
+    """
+    # Base threshold: ~7% of max_level, minimum 1
+    base = max(1, max_level // 15)
+    # Slight boost for larger vectors (harder for noise to be all-low)
+    if vec_size >= 16:
+        base = max(base, 2)
+    return base
+
+
 def vq_encode_bank(indices, vec_size, max_level=30, n_iter=20):
     """Encode a chunk of POKEY indices into one VQ bank.
+
+    If near-silent vectors exist (all samples <= threshold), codebook
+    index 0 is reserved for the silence vector [0,0,...,0].  This
+    guarantees:
+      - Perfect silence playback in quiet sections
+      - Clean padding at end of last bank (padding = 0x00 = silence)
+
+    If no near-silent vectors are present in the chunk, all 256
+    codebook entries are used for the actual signal — no waste.
 
     Returns:
         (bank_data, n_samples_encoded)
@@ -120,7 +148,43 @@ def vq_encode_bank(indices, vec_size, max_level=30, n_iter=20):
     used = n_vecs * vec_size
     vectors = indices[:used].reshape(n_vecs, vec_size)
 
-    codebook, assignments = _kmeans(vectors, N_CODES, n_iter, max_level)
+    # Check for near-silent vectors
+    thresh = _silence_threshold(max_level, vec_size)
+    near_silent_mask = np.all(vectors <= thresh, axis=1)
+    n_near_silent = int(near_silent_mask.sum())
+
+    if n_near_silent > 0:
+        # ── Reserve codebook[0] for silence ──
+        non_silent = vectors[~near_silent_mask]
+
+        if len(non_silent) == 0:
+            # Entire chunk is near-silent: single silence entry suffices
+            codebook = np.zeros((N_CODES, vec_size), dtype=np.uint8)
+            assignments = np.zeros(n_vecs, dtype=np.uint8)
+        else:
+            # Train 255 codes on non-silent vectors
+            cb_rest, _ = _kmeans(non_silent, n_codes=N_CODES - 1,
+                                 n_iter=n_iter, max_level=max_level)
+
+            # Build codebook: index 0 = silence, 1..255 = trained codes
+            codebook = np.zeros((N_CODES, vec_size), dtype=np.uint8)
+            codebook[1:N_CODES] = cb_rest[:N_CODES - 1]
+
+            # Final assignment: all vectors against full 256-entry codebook
+            # Near-silent vectors are assigned to index 0 (silence),
+            # others are matched against entries 1-255
+            cb_f = codebook.astype(np.float32)
+            vf = vectors.astype(np.float32)
+            chunk_size = min(50000, n_vecs)
+            assignments = np.empty(n_vecs, dtype=np.uint8)
+            for s in range(0, n_vecs, chunk_size):
+                e = min(s + chunk_size, n_vecs)
+                d = np.sum((vf[s:e, None, :] - cb_f[None, :, :]) ** 2,
+                           axis=2)
+                assignments[s:e] = np.argmin(d, axis=1).astype(np.uint8)
+    else:
+        # ── No near-silent vectors: use all 256 codes ──
+        codebook, assignments = _kmeans(vectors, N_CODES, n_iter, max_level)
 
     cb_bytes = N_CODES * vec_size
     bank = bytearray(cb_bytes + n_vecs)
