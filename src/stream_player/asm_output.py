@@ -13,7 +13,23 @@ Produces a project directory with:
 import os
 
 from .tables import pack_dual_byte, index_to_volumes, max_level
-from .layout import DBANK_TABLE
+from .layout import DBANK_TABLE, TAB_MEM_BANKS
+
+
+def _to_screen_codes(text):
+    """Convert ASCII text to ANTIC mode 2 screen codes (40 chars)."""
+    codes = []
+    for ch in text[:40]:
+        v = ord(ch)
+        if 0x20 <= v <= 0x5F:
+            codes.append(v - 0x20)
+        elif 0x60 <= v <= 0x7F:
+            codes.append(v)
+        else:
+            codes.append(0x00)
+    while len(codes) < 40:
+        codes.append(0x00)
+    return codes
 
 
 def generate_asm_project(output_dir, banks, portb_table, divisor, audctl,
@@ -36,8 +52,9 @@ def generate_asm_project(output_dir, banks, portb_table, divisor, audctl,
     _write_tables(output_dir, portb_table, pokey_channels)
     _write_player(output_dir, compressed, stereo)
     _write_banks(output_dir, n_banks, portb_table)
+    _write_mem_detect(output_dir)
     _write_main(output_dir, compressed, stereo, source_name, actual_rate,
-                duration, n_banks)
+                duration, n_banks, pokey_channels)
     _write_build_scripts(output_dir)
 
     return os.path.join(output_dir, "stream_player.asm")
@@ -86,6 +103,9 @@ NMIEN   = $D40E
 
 ; --- PIA ---
 PORTB   = $D301
+
+; --- Runtime bank detection ---
+TAB_MEM_BANKS = $0480   ; 65 bytes: detected bank PORTB values
 """)
         if stereo:
             f.write("""
@@ -146,19 +166,12 @@ def _write_tables(output_dir, portb_table, pokey_channels=4):
 ; ==========================================================================
 
 ; --- PORTB values for extended memory banks ---
+; Placeholder — filled at runtime from TAB_MEM_BANKS (detected by mem_detect)
 portb_table:
 """)
-        for i in range(0, len(portb_table), 8):
-            chunk = portb_table[i:i+8]
-            vals = ",".join(f"${v:02X}" for v in chunk)
+        for i in range(0, 64, 8):
+            vals = ",".join(["$FE"] * 8)
             f.write(f"    .byte {vals}\n")
-
-        remaining = 64 - len(portb_table)
-        if remaining > 0:
-            for i in range(0, remaining, 8):
-                chunk_size = min(8, remaining - i)
-                vals = ",".join(["$FE"] * chunk_size)
-                f.write(f"    .byte {vals}\n")
 
         max_lvl = max_level(pokey_channels)
         for ch in range(pokey_channels):
@@ -592,26 +605,169 @@ def _write_banks(output_dir, n_banks, portb_table):
         f.write(f"""\
 ; ==========================================================================
 ; banks.icl -- Bank data segments ({n_banks} banks)
+;
+; Each stub reads the runtime-detected PORTB value from TAB_MEM_BANKS
+; (populated by mem_detect INI) and switches to that bank before loading.
 ; ==========================================================================
 
 """)
         for i in range(n_banks):
-            pv = portb_table[i]
-            f.write(f"; --- Bank {i} (PORTB=${pv:02X}) ---\n")
-            f.write(f"    org bank_switch_val\n")
-            f.write(f"    .byte ${pv:02X}\n")
+            tmb_offset = i + 1  # +1 because entry 0 = main RAM
+            f.write(f"; --- Bank {i} (TAB_MEM_BANKS+{tmb_offset}) ---\n")
+            f.write(f"    org bank_switch_stub\n")
+            f.write(f"    lda TAB_MEM_BANKS+{tmb_offset}\n")
+            f.write(f"    sta PORTB\n")
+            f.write(f"    rts\n")
             f.write(f"    ini bank_switch_stub\n")
             f.write(f"    org $4000\n")
             f.write(f"    ins 'bank_{i:02d}.bin'\n\n")
 
 
+def _write_mem_detect(output_dir):
+    """Write mem_detect.icl — runtime extended memory bank detection."""
+    with open(os.path.join(output_dir, "mem_detect.icl"), 'w', newline='\n') as f:
+        f.write("""\
+; ==========================================================================
+; mem_detect.icl -- Runtime detection of extended memory banks
+; ==========================================================================
+; Implements the @MEM_DETECT algorithm:
+;   Phase 1: Save $7FFF from each of 64 possible bank codes
+;   Phase 2: Write PORTB code as signature to $7FFF in each bank
+;   Phase 3: Write $FF sentinel to main RAM $7FFF
+;   Phase 4: Read back — codes whose signature survived are unique banks
+;   Phase 5: Restore original $7FFF values
+;
+; Result: TAB_MEM_BANKS filled with:
+;   +0: $FF (main memory)
+;   +1: PORTB value for first detected extended bank
+;   +2: PORTB value for second detected extended bank
+;   ...
+; ==========================================================================
+
+    org bank_switch_stub
+
+mem_detect:
+    sei
+    lda #0
+    sta $D40E               ; disable NMI
+
+    lda PORTB
+    pha                     ; save original PORTB
+
+    ; Zero-fill TAB_MEM_BANKS
+    lda #0
+    ldx #64
+@zfill:
+    sta TAB_MEM_BANKS,x
+    dex
+    bpl @zfill
+
+    ; Phase 1: Save $7FFF from each bank
+    ldx #63
+@p1:
+    lda @dbank,x
+    sta PORTB
+    lda $7FFF
+    sta @saved,x
+    dex
+    bpl @p1
+
+    ; Phase 2: Write signatures
+    ldx #63
+@p2:
+    lda @dbank,x
+    sta PORTB
+    sta $7FFF               ; signature = PORTB code
+    dex
+    bpl @p2
+
+    ; Phase 3: Main RAM sentinel
+    pla                     ; original PORTB
+    ora #$11                ; ensure ROM on + main RAM (bit4=1)
+    pha
+    sta PORTB
+    lda #$FF
+    sta $7FFF               ; main RAM sentinel
+    sta TAB_MEM_BANKS       ; entry 0 = main
+
+    ; Phase 4: Verify
+    ldy #1                  ; output index
+    ldx #63
+@p4:
+    lda @dbank,x
+    sta PORTB
+    cmp $7FFF
+    bne @skip
+    sta TAB_MEM_BANKS,y
+    iny
+@skip:
+    dex
+    bpl @p4
+
+    ; Phase 5: Restore saved $7FFF
+    ldx #63
+@p5:
+    lda @dbank,x
+    sta PORTB
+    lda @saved,x
+    sta $7FFF
+    dex
+    bpl @p5
+
+    ; Restore
+    pla
+    sta PORTB
+    lda #$40
+    sta $D40E               ; re-enable VBI
+    cli
+    rts
+
+; --- Probe table (64 entries) ---
+@dbank:
+""")
+        # Write DBANK_TABLE as .byte directives
+        for i in range(0, 64, 8):
+            chunk = DBANK_TABLE[i:i+8]
+            vals = ",".join(f"${v:02X}" for v in chunk)
+            f.write(f"    .byte {vals}\n")
+
+        f.write("""
+; --- Saved $7FFF values (64 bytes) ---
+@saved:
+    .ds 64
+
+    ini mem_detect
+""")
+
+
 def _write_main(output_dir, compressed, stereo, source_name, actual_rate,
-                duration, n_banks):
+                duration, n_banks, pokey_channels=4):
     """Write stream_player.asm master file."""
     mode = "In-IRQ DeltaLZ" if compressed else "RAW"
     ch = "stereo (dual POKEY)" if stereo else "mono (4-channel)"
     dur_m = int(duration) // 60
     dur_s = int(duration) % 60
+    ram_kb = n_banks * 16 + 64
+    compress_tag = "DELTALZ" if compressed else "RAW"
+
+    # Generate screen codes for error/info text
+    # Generate screen codes for error display (two contiguous lines)
+    err_title = "STREAM PLAYER".center(40)
+    err_msg = f"ERROR: {ram_kb}KB MEMORY REQUIRED".center(40)
+    err_title_codes = _to_screen_codes(err_title)
+    err_msg_codes = _to_screen_codes(err_msg)
+
+    def _fmt_bytes(codes):
+        """Format screen codes as MADS .byte directives (8 per line)."""
+        lines = []
+        for i in range(0, len(codes), 8):
+            chunk = codes[i:i+8]
+            vals = ",".join(f"${v:02X}" for v in chunk)
+            lines.append(f"    .byte {vals}")
+        return "\n".join(lines)
+
+    err_title_bytes = _fmt_bytes(err_title_codes)
+    err_msg_bytes = _fmt_bytes(err_msg_codes)
 
     with open(os.path.join(output_dir, "stream_player.asm"), 'w', newline='\n') as f:
         f.write(f"""\
@@ -622,20 +778,16 @@ def _write_main(output_dir, compressed, stereo, source_name, actual_rate,
 ; Rate: {actual_rate:.1f} Hz
 ; Duration: {dur_m}:{dur_s:02d}
 ; Banks: {n_banks}
+; RAM required: {ram_kb}KB
 ; Assembler: MADS
 ; ==========================================================================
 
     icl 'config.icl'
 
-; --- Bank switch stub ($0600, XEX loading only) ---
+; --- Bank switch stub area ($0600, XEX loading only) ---
+; banks.icl writes complete LDA/STA/RTS routines here.
 
-    org $0600
-
-bank_switch_stub:
-bank_switch_val = *+1
-    lda #$FF
-    sta PORTB
-    rts
+bank_switch_stub = $0600
 
 ; --- Player code ($2000) ---
 
@@ -664,6 +816,20 @@ start:
     sta $FFFA
     lda #>nmi_handler
     sta $FFFB
+
+    ; Copy runtime-detected bank values into portb_table
+    ldx #{n_banks-1}
+copy_det:
+    lda TAB_MEM_BANKS+1,x
+    sta portb_table,x
+    dex
+    bpl copy_det
+
+    ; Memory check: verify enough extended banks detected
+    lda TAB_MEM_BANKS+{n_banks}
+    bne mem_ok
+    jmp mem_error
+mem_ok:
 
 """)
         if compressed:
@@ -694,7 +860,7 @@ main_loop:
     bne main_loop
 """)
 
-        f.write("""\
+        f.write(f"""\
 
     sei
     lda #0
@@ -707,14 +873,59 @@ main_loop:
 halt:
     jmp halt
 
+; --- Memory error display ---
+; Shown when machine has fewer extended banks than song requires.
+
+mem_error:
+    lda #$FF
+    sta PORTB               ; ROM on (need charset at $E000)
+    lda #<error_dlist
+    sta DLISTL
+    lda #>error_dlist
+    sta DLISTH
+    lda #$22
+    sta DMACTL              ; enable DL DMA + playfield
+    lda #$40
+    sta NMIEN               ; VBI only (for JVB)
+    lda #$3E
+    sta $D017               ; COLPF1 = bright red
+    lda #0
+    sta $D018               ; COLPF2 = black
+    lda #$30
+    sta $D01A               ; COLBK = red
+    cli
+error_halt:
+    jmp error_halt
+
+    ; Display list: 8 blank lines, then 2 text lines (Mode 2)
+error_dlist:
+    .byte $70,$70,$70,$70,$70,$70,$70,$70
+    .byte $42               ; Mode 2 + LMS
+    .word error_title
+    .byte $02               ; Mode 2 (line 2 = error_msg, contiguous)
+    .byte $41               ; JVB
+    .word error_dlist
+
+    ; Title (40 bytes) + error message (40 bytes), contiguous for display list
+error_title:
+{err_title_bytes}
+error_msg:
+{err_msg_bytes}
+
+; --- Memory detection (runs as first INI, before bank loading) ---
+
+    icl 'mem_detect.icl'
+
 ; --- Bank data ---
 
     icl 'banks.icl'
 
-; --- Restore main RAM, start player ---
+; --- Restore main RAM after bank loading ---
 
-    org bank_switch_val
-    .byte PORTB_MAIN
+    org bank_switch_stub
+    lda #PORTB_MAIN
+    sta PORTB
+    rts
     ini bank_switch_stub
 
     run start

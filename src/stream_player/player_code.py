@@ -19,6 +19,7 @@ enables 12-15 kHz sample rates.
 
 from .tables import (pack_dual_byte, quad_index_to_volumes, QUAD_MAX_LEVEL,
                      index_to_volumes, max_level, get_table)
+from .layout import TAB_MEM_BANKS, DBANK_TABLE
 
 # Hardware registers
 PORTB  = 0xD301
@@ -218,7 +219,8 @@ def _to_screen_codes(text):
     return codes
 
 
-def _format_info_line(pokey_channels, sample_rate, compress_mode, vec_size=8):
+def _format_info_line(pokey_channels, sample_rate, compress_mode,
+                      vec_size=8, ram_kb=64):
     """Format 40-column info line for splash screen."""
     rate_hz = int(round(sample_rate))
     ch_str = f"{pokey_channels}CH"
@@ -231,16 +233,22 @@ def _format_info_line(pokey_channels, sample_rate, compress_mode, vec_size=8):
     else:
         comp_str = "RAW"
 
-    line = f"  {ch_str}  {rate_str}  {comp_str}"
+    ram_str = f"{ram_kb}KB"
+    line = f"  {ch_str}  {rate_str}  {comp_str}  {ram_str}"
     return line.upper().ljust(40)[:40]
 
 
-def _emit_splash(c, pokey_channels, sample_rate, compress_mode, vec_size=8):
+def _emit_splash(c, pokey_channels, sample_rate, compress_mode,
+                 vec_size=8, n_banks=0):
     """Emit splash screen: text, display list, wait loop, return-to-idle.
 
     Shows two text lines on screen:
       Line 1: "STREAM PLAYER  -  [SPACE] TO PLAY"
-      Line 2: "2CH  7988HZ  DELTALZ" (or VQ/RAW)
+      Line 2: "4CH  7988HZ  DELTALZ  128KB"
+
+    If n_banks > 0, a runtime check verifies that mem_detect found
+    enough banks. If not, line 1 is replaced with an error message
+    and the machine halts (no playback possible).
 
     Prerequisites:
       - Charset must be copied from ROM to RAM by an INIT segment in
@@ -248,15 +256,22 @@ def _emit_splash(c, pokey_channels, sample_rate, compress_mode, vec_size=8):
         reads garbage from $E000 when ROM is disabled.
 
     Flow:
-      start → show_splash → wait_loop (polls SPACE)
+      start → [mem_check] → show_splash → wait_loop (polls SPACE)
         → play_init (caller must emit this label)
       return_to_idle ← (called when song ends) → show_splash
     """
     CHBASE = 0xD409  # ANTIC character base register
 
+    ram_kb = n_banks * 16 + 64
+
     # ── Text data (40 bytes each, ANTIC screen codes) ──
+    # Normal splash: line1 + line2 contiguous (display list uses continuation)
     line1 = "  STREAM PLAYER  -  [SPACE] TO PLAY     "
-    line2 = _format_info_line(pokey_channels, sample_rate, compress_mode, vec_size)
+    line2 = _format_info_line(pokey_channels, sample_rate, compress_mode,
+                              vec_size, ram_kb)
+    # Error screen: err_title + err_msg contiguous (same display list trick)
+    err_title = "STREAM PLAYER".center(40)
+    err_msg = f"ERROR: {ram_kb}KB MEMORY REQUIRED".center(40)
 
     c.label('text_line1')
     for code in _to_screen_codes(line1):
@@ -264,12 +279,20 @@ def _emit_splash(c, pokey_channels, sample_rate, compress_mode, vec_size=8):
     c.label('text_line2')
     for code in _to_screen_codes(line2):
         c.emit(code)
+    # Error pair must be contiguous so Mode 2 continuation works
+    c.label('text_err_title')
+    for code in _to_screen_codes(err_title):
+        c.emit(code)
+    c.label('text_err_msg')
+    for code in _to_screen_codes(err_msg):
+        c.emit(code)
 
     # ── Display list ──
     c.label('dlist')
     for _ in range(8):           # 64 blank scanlines (centers text)
         c.emit(0x70)
     c.emit(0x42)                 # Mode 2 + LMS
+    c.label('dlist_lms')         # mark LMS address bytes for patching
     addr1 = c.labels['text_line1']
     c.emit(addr1 & 0xFF, (addr1 >> 8) & 0xFF)
     c.emit(0x02)                 # Mode 2 continuation (line 2)
@@ -304,6 +327,33 @@ def _emit_splash(c, pokey_channels, sample_rate, compress_mode, vec_size=8):
     # Initialize keyboard scan
     c.lda_imm(0x00); c.sta_abs(SKCTL)
     c.lda_imm(0x03); c.sta_abs(SKCTL)
+
+    # ══════════════════════════════════════════════════════════════
+    # MEMORY CHECK (skip if n_banks==0, i.e. no extended RAM needed)
+    # ══════════════════════════════════════════════════════════════
+    if n_banks > 0:
+        # TAB_MEM_BANKS entries are filled sequentially: +1, +2, ...
+        # If entry +n_banks is non-zero, we have enough banks.
+        c.lda_abs(TAB_MEM_BANKS + n_banks)
+        c.bne('show_splash')     # non-zero → sufficient memory
+
+        # Insufficient: patch display list LMS to show error text pair
+        c.lda_imm_lo('text_err_title')
+        c.sta_abs(c.labels['dlist_lms'])
+        c.lda_imm_hi('text_err_title')
+        c.sta_abs(c.labels['dlist_lms'] + 1)
+
+        # Show error display and halt
+        c.lda_imm_lo('dlist'); c.sta_abs(DLISTL)
+        c.lda_imm_hi('dlist'); c.sta_abs(DLISTH)
+        c.lda_imm(0x22); c.sta_abs(DMACTL)     # DL DMA + playfield
+        c.lda_imm(0x40); c.sta_abs(NMIEN)      # VBI only (for JVB)
+        c.lda_imm(0x3E); c.sta_abs(COLPF1_W)   # text: bright red
+        c.lda_imm(0x00); c.sta_abs(COLPF2_W)   # text bg: black
+        c.lda_imm(0x30); c.sta_abs(COLBK_W)    # border: red
+        c.cli()
+        c.label('error_halt')
+        c.jmp('error_halt')
 
     # ══════════════════════════════════════════════════════════════
     # SHOW SPLASH (also re-entry point after song ends)
@@ -475,8 +525,152 @@ def build_charset_copy_init():
     return bytes(code)
 
 
-# ======================================================================
-# RAW mode player
+def build_mem_detect_init():
+    """Build INIT segment that detects extended memory banks at runtime.
+
+    Implements the @MEM_DETECT algorithm:
+      Phase 1: Save $7FFF from each of 64 possible bank codes
+      Phase 2: Write PORTB code as signature to $7FFF in each bank
+      Phase 3: Write $FF sentinel to main RAM $7FFF, store as entry 0
+      Phase 4: Read back — codes whose signature survived are unique banks
+      Phase 5: Restore original $7FFF values
+
+    Result stored at TAB_MEM_BANKS ($0480):
+      +0: $FF (main memory)
+      +1..+N: detected bank PORTB values (one per physical bank found)
+
+    Returns: 6502 machine code bytes (placed at $2E00 as INIT segment).
+    """
+    BASE = 0x2E00
+    PORTB_HW = 0xD301
+    NMIEN_HW = 0xD40E
+    TEST_ADDR = 0x7FFF
+    TMB = TAB_MEM_BANKS
+
+    code = bytearray()
+    # Track patch sites: list of (offset_in_code, 'dbank'|'saved')
+    patches = []
+
+    def emit(*b):
+        code.extend(b)
+
+    def abs_addr(label_name):
+        """Emit 2 placeholder bytes for a forward-referenced address."""
+        patches.append((len(code), label_name))
+        emit(0x00, 0x00)
+
+    # ── SEI + disable NMI ──
+    emit(0x78)                                            # SEI
+    emit(0xA9, 0x00, 0x8D, NMIEN_HW & 0xFF, (NMIEN_HW >> 8) & 0xFF)  # LDA #0 / STA NMIEN
+
+    # Save current PORTB
+    emit(0xAD, PORTB_HW & 0xFF, (PORTB_HW >> 8) & 0xFF)  # LDA PORTB
+    emit(0x48)                                            # PHA
+
+    # Zero-fill TAB_MEM_BANKS (65 bytes: indices 0..64)
+    emit(0xA9, 0x00)                                      # LDA #0
+    emit(0xA2, 64)                                        # LDX #64
+    zfill = len(code)
+    emit(0x9D, TMB & 0xFF, (TMB >> 8) & 0xFF)            # STA TMB,X
+    emit(0xCA)                                            # DEX
+    emit(0x10, (zfill - len(code) - 2) & 0xFF)           # BPL zfill
+
+    # ── Phase 1: Save $7FFF from each of 64 bank codes ──
+    emit(0xA2, 63)                                        # LDX #63
+    p1 = len(code)
+    emit(0xBD); abs_addr('dbank')                         # LDA dbank,X
+    emit(0x8D, PORTB_HW & 0xFF, (PORTB_HW >> 8) & 0xFF)  # STA PORTB
+    emit(0xAD, TEST_ADDR & 0xFF, (TEST_ADDR >> 8) & 0xFF) # LDA $7FFF
+    emit(0x9D); abs_addr('saved')                         # STA saved,X
+    emit(0xCA)                                            # DEX
+    emit(0x10, (p1 - len(code) - 2) & 0xFF)              # BPL p1
+
+    # ── Phase 2: Write signatures (PORTB code → $7FFF) ──
+    emit(0xA2, 63)                                        # LDX #63
+    p2 = len(code)
+    emit(0xBD); abs_addr('dbank')                         # LDA dbank,X
+    emit(0x8D, PORTB_HW & 0xFF, (PORTB_HW >> 8) & 0xFF)  # STA PORTB
+    emit(0x8D, TEST_ADDR & 0xFF, (TEST_ADDR >> 8) & 0xFF) # STA $7FFF
+    emit(0xCA)                                            # DEX
+    emit(0x10, (p2 - len(code) - 2) & 0xFF)              # BPL p2
+
+    # ── Phase 3: Main RAM sentinel ──
+    emit(0x68)                                            # PLA (original PORTB)
+    emit(0x09, 0x11)                                      # ORA #$11 (bit0=ROM, bit4=main RAM)
+    emit(0x48)                                            # PHA
+    emit(0x8D, PORTB_HW & 0xFF, (PORTB_HW >> 8) & 0xFF)  # STA PORTB
+    emit(0xA9, 0xFF)                                      # LDA #$FF
+    emit(0x8D, TEST_ADDR & 0xFF, (TEST_ADDR >> 8) & 0xFF) # STA $7FFF
+    emit(0x8D, TMB & 0xFF, (TMB >> 8) & 0xFF)            # STA TMB+0
+
+    # ── Phase 4: Verify — find unique banks ──
+    emit(0xA0, 0x01)                                      # LDY #1 (output idx)
+    emit(0xA2, 63)                                        # LDX #63
+    p4 = len(code)
+    emit(0xBD); abs_addr('dbank')                         # LDA dbank,X
+    emit(0x8D, PORTB_HW & 0xFF, (PORTB_HW >> 8) & 0xFF)  # STA PORTB
+    emit(0xCD, TEST_ADDR & 0xFF, (TEST_ADDR >> 8) & 0xFF) # CMP $7FFF
+    skip_patch = len(code)
+    emit(0xD0, 0x00)                                      # BNE skip (patched)
+    emit(0x99, TMB & 0xFF, (TMB >> 8) & 0xFF)            # STA TMB,Y
+    emit(0xC8)                                            # INY
+    skip_target = len(code)
+    code[skip_patch + 1] = (skip_target - skip_patch - 2) & 0xFF
+    emit(0xCA)                                            # DEX
+    emit(0x10, (p4 - len(code) - 2) & 0xFF)              # BPL p4
+
+    # ── Phase 5: Restore saved $7FFF values ──
+    emit(0xA2, 63)                                        # LDX #63
+    p5 = len(code)
+    emit(0xBD); abs_addr('dbank')                         # LDA dbank,X
+    emit(0x8D, PORTB_HW & 0xFF, (PORTB_HW >> 8) & 0xFF)  # STA PORTB
+    emit(0xBD); abs_addr('saved')                         # LDA saved,X
+    emit(0x8D, TEST_ADDR & 0xFF, (TEST_ADDR >> 8) & 0xFF) # STA $7FFF
+    emit(0xCA)                                            # DEX
+    emit(0x10, (p5 - len(code) - 2) & 0xFF)              # BPL p5
+
+    # ── Restore PORTB and interrupts ──
+    emit(0x68)                                            # PLA
+    emit(0x8D, PORTB_HW & 0xFF, (PORTB_HW >> 8) & 0xFF)  # STA PORTB
+    emit(0xA9, 0x40)                                      # LDA #$40
+    emit(0x8D, NMIEN_HW & 0xFF, (NMIEN_HW >> 8) & 0xFF)  # STA NMIEN
+    emit(0x58)                                            # CLI
+    emit(0x60)                                            # RTS
+
+    # ── Data tables (after code) ──
+    labels = {}
+    labels['dbank'] = BASE + len(code)
+    for v in DBANK_TABLE:
+        emit(v)
+
+    labels['saved'] = BASE + len(code)
+    for _ in range(64):
+        emit(0x00)
+
+    # ── Patch forward references ──
+    for offset, name in patches:
+        addr = labels[name]
+        code[offset] = addr & 0xFF
+        code[offset + 1] = (addr >> 8) & 0xFF
+
+    return bytes(code)
+
+
+def _emit_copy_detected_banks(c, n_banks):
+    """Emit code to copy n_banks detected PORTB values into portb_table.
+
+    Reads from TAB_MEM_BANKS+1..+n_banks (filled by mem_detect at load time)
+    and writes to the player's embedded portb_table (filled with placeholders
+    at build time).  Must be called in play_init BEFORE any portb_table access.
+    """
+    if n_banks <= 0:
+        return  # nothing to copy
+    c.ldx_imm(n_banks - 1)
+    c.label('copy_det')
+    c.lda_absx(TAB_MEM_BANKS + 1)
+    c.sta_absx(c.labels['portb_table'])
+    c.dex()
+    c.bpl('copy_det')
 # ======================================================================
 
 def build_raw_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
@@ -487,8 +681,7 @@ def build_raw_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
     c.label('nmi_handler'); c.rti()
 
     c.label('portb_table')
-    for p in portb_table: c.emit(p)
-    for _ in range(64 - len(portb_table)): c.emit(PORTB_MAIN)
+    for _ in range(64): c.emit(PORTB_MAIN)  # placeholder — filled by copy_det
 
     # N AUDC lookup tables (256 bytes each)
     max_lvl = max_level(pokey_channels)
@@ -501,12 +694,15 @@ def build_raw_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
             c.emit(0x10)
 
     # ── Splash screen ──
-    _emit_splash(c, pokey_channels, sample_rate, 'off')
+    _emit_splash(c, pokey_channels, sample_rate, 'off', n_banks=n_banks)
 
     # ── Play init (entered from splash on SPACE press, SEI already done) ──
     c.label('play_init')
     c.lda_imm_lo('irq_handler'); c.sta_abs(0xFFFE)
     c.lda_imm_hi('irq_handler'); c.sta_abs(0xFFFF)
+
+    # Copy runtime-detected bank values into portb_table
+    _emit_copy_detected_banks(c, n_banks)
 
     c.lda_imm(0x00); c.sta_zp(ZP_SAMPLE_PTR)
     c.lda_imm(0x40); c.sta_zp(ZP_SAMPLE_PTR + 1)
@@ -561,8 +757,7 @@ def build_lzsa_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
 
     # -- PORTB table --
     c.label('portb_table')
-    for p in portb_table: c.emit(p)
-    for _ in range(64 - len(portb_table)): c.emit(PORTB_MAIN)
+    for _ in range(64): c.emit(PORTB_MAIN)  # placeholder — filled by copy_det
 
     if mode == '1cps':
         # 2 lookup tables (256 bytes each), indexed by delta_acc value.
@@ -589,12 +784,15 @@ def build_lzsa_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
                 c.emit(0x10)
 
     # ── Splash screen ──
-    _emit_splash(c, pokey_channels, sample_rate, 'lz')
+    _emit_splash(c, pokey_channels, sample_rate, 'lz', n_banks=n_banks)
 
     # ── Play init ──
     c.label('play_init')
     c.lda_imm_lo('irq_handler'); c.sta_abs(0xFFFE)
     c.lda_imm_hi('irq_handler'); c.sta_abs(0xFFFF)
+
+    # Copy runtime-detected bank values into portb_table
+    _emit_copy_detected_banks(c, n_banks)
 
     c.jsr('init_first_bank')
     c.jsr('pokey_setup')
@@ -940,10 +1138,7 @@ def build_vq_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
 
     # ── PORTB table ──
     c.label('portb_table')
-    for p in portb_table:
-        c.emit(p)
-    for _ in range(64 - len(portb_table)):
-        c.emit(PORTB_MAIN)
+    for _ in range(64): c.emit(PORTB_MAIN)  # placeholder — filled by copy_det
 
     # ── AUDC lookup tables (256 bytes × pokey_channels) ──
     max_lvl = max_level(pokey_channels)
@@ -965,7 +1160,7 @@ def build_vq_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
         c.emit(((VQ_CB_BASE + i * vec_size) >> 8) & 0xFF)
 
     # ── Splash screen ──
-    _emit_splash(c, pokey_channels, sample_rate, 'vq', vec_size)
+    _emit_splash(c, pokey_channels, sample_rate, 'vq', vec_size, n_banks=n_banks)
 
     # ══════════════════════════════════════════════════════════════
     # PLAY INIT (entered from splash on SPACE press, SEI already done)
@@ -973,6 +1168,9 @@ def build_vq_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
     c.label('play_init')
     c.lda_imm_lo('irq_handler'); c.sta_abs(0xFFFE)
     c.lda_imm_hi('irq_handler'); c.sta_abs(0xFFFF)
+
+    # Copy runtime-detected bank values into portb_table
+    _emit_copy_detected_banks(c, n_banks)
 
     # Init ZP
     c.lda_imm(0x00)

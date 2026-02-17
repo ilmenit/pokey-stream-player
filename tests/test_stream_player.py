@@ -350,12 +350,13 @@ class TestPlayerCode(unittest.TestCase):
         self.assertGreater(len(code), 200)
 
     def test_raw_player_contains_portb(self):
-        """Verify PORTB table is embedded in player code."""
+        """Verify PORTB table is embedded as placeholders (filled at runtime)."""
         portb = [0xE3, 0xC3, 0xA3]
         code, _, _ = build_raw_player(0x37, 0x40, 3, portb, False)
-        # PORTB values should appear in the code
-        for p in portb:
-            self.assertIn(bytes([p]), code)
+        # PORTB table should contain $FE placeholders, not hardcoded values
+        # (runtime detection fills these via copy_det loop)
+        fe_run = bytes([0xFE] * 64)
+        self.assertIn(fe_run, code)
 
     def test_irq_vector_written(self):
         """Verify IRQ vector stores target an address within the code."""

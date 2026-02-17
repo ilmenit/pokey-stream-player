@@ -13,7 +13,7 @@ Special segments:
 """
 
 from .errors import XEXBuildError
-from .layout import BANK_BASE, BANK_END, DBANK_TABLE
+from .layout import BANK_BASE, BANK_END, DBANK_TABLE, TAB_MEM_BANKS
 
 
 class XEXBuilder:
@@ -56,17 +56,22 @@ class XEXBuilder:
         """Add a bank switching stub + data load for one bank.
         
         Creates:
-        1. An INIT stub that switches PORTB to the target bank
+        1. An INIT stub that reads the bank's PORTB value from
+           TAB_MEM_BANKS (filled by mem_detect) and switches to it
         2. A data segment at $4000-$7FFF with the bank's data
+        
+        Requires: mem_detect INIT must have already run to populate
+        TAB_MEM_BANKS with runtime-detected PORTB values.
         """
         if bank_idx >= len(DBANK_TABLE):
             raise XEXBuildError(f"Bank index {bank_idx} exceeds maximum")
         
-        portb = DBANK_TABLE[bank_idx]
-        
-        # INIT stub: switch to this bank
-        # LDA #portb / STA $D301 / RTS
-        stub = bytes([0xA9, portb, 0x8D, 0x01, 0xD3, 0x60])
+        # INIT stub: read detected PORTB from TAB_MEM_BANKS and switch
+        # TAB_MEM_BANKS+0 = main RAM ($FF), +1 = first bank, +2 = second, ...
+        addr = TAB_MEM_BANKS + 1 + bank_idx
+        # LDA TAB_MEM_BANKS+1+N / STA $D301 / RTS  (7 bytes)
+        stub = bytes([0xAD, addr & 0xFF, (addr >> 8) & 0xFF,
+                      0x8D, 0x01, 0xD3, 0x60])
         self.add_init_segment(stub, 0x2E00)
         
         # Data at bank window
@@ -123,7 +128,8 @@ class XEXBuilder:
 
 def build_xex(player_code: bytes, player_origin: int,
               bank_data: list, run_addr: int,
-              charset_init: bytes = None) -> bytes:
+              charset_init: bytes = None,
+              mem_detect_init: bytes = None) -> bytes:
     """Build a complete XEX with player code and banked data.
     
     Args:
@@ -133,6 +139,9 @@ def build_xex(player_code: bytes, player_origin: int,
         run_addr: Address to execute after loading
         charset_init: Optional INIT code to copy charset ROM→RAM.
                       If provided, replaces the simple PORTB restore.
+        mem_detect_init: Optional INIT code to detect extended memory banks.
+                         If provided, runs BEFORE any bank loading to populate
+                         TAB_MEM_BANKS with hardware-detected PORTB values.
         
     Returns:
         Complete XEX binary
@@ -142,10 +151,13 @@ def build_xex(player_code: bytes, player_origin: int,
     # Player code segment (first, before any bank switching)
     xex.add_segment(player_origin, player_code)
     
-    # Bank data segments (each with INIT stub to switch banks)
+    # Memory detection INIT (must run BEFORE any bank loading stubs)
+    if mem_detect_init and bank_data:
+        xex.add_init_segment(mem_detect_init, 0x2E00)
+    
+    # Bank data segments (each with INIT stub that reads TAB_MEM_BANKS)
     for bank_idx, data in enumerate(bank_data):
         if data:
-            # Pad to full bank size if needed (some loaders expect it)
             xex.add_bank_data(bank_idx, data)
     
     # After all banks loaded: copy charset from ROM to RAM, then

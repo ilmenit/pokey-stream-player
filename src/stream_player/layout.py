@@ -11,7 +11,16 @@ BANK_BASE = 0x4000    # Start of bank window
 BANK_END = 0x8000     # End of bank window
 MAX_BANKS = 64        # Maximum possible banks (1MB)
 
-# PORTB values for each bank (matches MADS @MEM_DETECT ordering)
+# Runtime bank detection results table (filled by mem_detect INIT segment).
+# +0: $FF (main memory sentinel, always present)
+# +1..+64: PORTB values for each detected physical bank
+# Located in cassette buffer area — safe during XEX loading and playback.
+TAB_MEM_BANKS = 0x0480  # 65 bytes ($0480-$04C0)
+
+# PORTB probe ordering for @MEM_DETECT (matches MADS dBANK table).
+# Phase 2 writes signatures using X from 63→0, so the lowest-index
+# entry per physical bank becomes the canonical code.
+# All entries have bit4=0 (CPU extended RAM access enabled).
 DBANK_TABLE = [
     0xE3, 0xC3, 0xA3, 0x83, 0x63, 0x43, 0x23, 0x03,
     0xE7, 0xC7, 0xA7, 0x87, 0x67, 0x47, 0x27, 0x07,

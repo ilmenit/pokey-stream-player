@@ -1,8 +1,10 @@
-"""Stream Player CLI — Convert audio to Atari XEX with dual POKEY.
+"""Stream Player CLI — Convert audio to Atari 8-bit with POKEY playback.
 
 Usage:
-    python -m stream_player input.wav -r 15000 -o output.xex
-    python -m stream_player song.mp3 -r 8000 -c lz -o output.xex
+    encode song.mp3                        Default: VQ4 → XEX
+    encode song.mp3 -a                     Also generate ASM project
+    encode song.mp3 --no-xex -a            ASM project only
+    encode song.mp3 -c lz                  DeltaLZ compression
 """
 
 import argparse
@@ -33,7 +35,7 @@ def _progress_bar(done: int, total: int, width: int = 30) -> str:
     """Render a simple progress bar string."""
     frac = done / total if total > 0 else 1.0
     filled = int(width * frac)
-    bar = "█" * filled + "░" * (width - filled)
+    bar = "\u2588" * filled + "\u2591" * (width - filled)
     return f"[{bar}] {frac:5.1%}"
 
 
@@ -46,45 +48,54 @@ def _compress_progress(pos, total, n_banks):
 def _print_usage():
     """Print friendly usage when invoked with no arguments."""
     print("""
-  ╔═══════════════════════════════════════════════════════════════╗
-  ║  stream-player — Audio to Atari 8-bit XEX converter         ║
-  ║  1-4 channel POKEY PCM from extended memory (XL/XE)          ║
-  ╚═══════════════════════════════════════════════════════════════╝
+  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
+  \u2551  stream-player \u2014 Audio to Atari 8-bit converter              \u2551
+  \u2551  1-4 channel POKEY PCM from extended memory (XL/XE)          \u2551
+  \u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d
 
   USAGE:
     encode <input-file> [options]
 
   QUICK START:
-    encode song.mp3                            Default: 2ch, LZ compressed
+    encode song.mp3                            Default: VQ4 \u2192 XEX
+    encode song.mp3 -a                         Also generate ASM project
+    encode song.mp3 --no-xex -a                ASM project only
+    encode song.mp3 -c lz                      DeltaLZ (lossless) \u2192 XEX
+    encode song.mp3 -c off                     RAW (no compression) \u2192 XEX
     encode song.mp3 -e                         Treble pre-emphasis for HW
-    encode song.mp3 -c vq                      VQ (7× compression, lossy)
-    encode song.mp3 -c vq -e                   VQ + enhanced
     encode song.mp3 -n 4                       4ch (louder, slight roughness)
-    encode song.mp3 -o my_song.xex             Custom output name
+    encode song.mp3 -o my_song                 Custom output name
 
-  COMMON OPTIONS:
-    -c off|lz|vq          Compression mode (default: lz)
-    -s 4|8|16             VQ vector size (default: 8)
-    -n 1|2|3|4            POKEY channels (default: 2)
-    -e, --enhance         Treble pre-emphasis for real HW (default: off)
-    -r RATE               Sample rate in Hz (default: 8000)
-    -o FILE               Output file (default: <input>.xex)
-    -h, --help            Full help with all options
+  OUTPUT OPTIONS:
+    -x, --xex                 Generate .xex binary (default: ON)
+    --no-xex                  Skip .xex generation
+    -a, --asm                 Generate MADS assembly project (default: OFF)
+    -o NAME                   Output base name (adds .xex / _asm as needed)
 
-  CHANNELS → QUALITY vs CPU:
-    1 ch: 16 levels, ~80cy/IRQ  │  3 ch: 46 levels, ~96cy/IRQ
-    2 ch: 31 levels, ~88cy/IRQ  │  4 ch: 61 levels, ~104cy/IRQ
+  COMPRESSION:
+    -c off|lz|vq              Compression mode (default: vq)
+    -s 4|8|16                 VQ vector size (default: 4)
+
+  AUDIO:
+    -n 1|2|3|4                POKEY channels (default: 2)
+    -e, --enhance             Treble pre-emphasis for real HW
+    -r RATE                   Sample rate in Hz (default: 8000)
+    -h, --help                Full help with all options
+
+  CHANNELS \u2192 QUALITY vs CPU:
+    1 ch: 16 levels, ~80cy/IRQ  \u2502  3 ch: 46 levels, ~96cy/IRQ
+    2 ch: 31 levels, ~88cy/IRQ  \u2502  4 ch: 61 levels, ~104cy/IRQ
 
   SUPPORTED FORMATS:
     WAV, MP3, FLAC, OGG, AIFF (via soundfile, no external binaries)
     MOD, XM, S3M, IT, SID, ... (require ffmpeg installed)
 
   MEMORY & DURATION (8 kHz, mono, 2ch):
-    Memory              Raw     DeltaLZ    VQ (vec=8)
-    130XE (64KB)        ~8s      ~10s       ~57s
-    256KB               ~32s     ~42s       ~3:48
-    512KB               1:05     ~1:25      ~7:36
-    1MB                 2:11     ~2:50      ~15:12
+    Memory              Raw     DeltaLZ    VQ (vec=4)
+    130XE (64KB)        ~8s      ~10s       ~32s
+    256KB               ~32s     ~42s       ~2:08
+    512KB               1:05     ~1:25      ~4:16
+    1MB                 2:11     ~2:50      ~8:32
 """)
 
 
@@ -96,40 +107,57 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(
         prog='encode',
-        description='Convert audio files to Atari 8-bit XEX with POKEY playback.',
+        description='Convert audio files to Atari 8-bit with POKEY playback.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  encode song.mp3                                   Default: 2ch, DeltaLZ
-  encode song.mp3 --compression vq                     VQ compression (~7x, lossy)
-  encode song.mp3 --compression vq -s 16       VQ with larger vectors (~12x)
-  encode song.mp3 --compression off                    Raw (no compression)
-  encode song.mp3 --channels 4                      4ch (louder, slight roughness)
+  encode song.mp3                                Default: VQ4 \u2192 XEX
+  encode song.mp3 -a                             Also generate ASM project
+  encode song.mp3 --no-xex -a                    ASM project only
+  encode song.mp3 -c lz                          DeltaLZ (lossless)
+  encode song.mp3 -c lz -a                       DeltaLZ, XEX + ASM
+  encode song.mp3 -c off                         RAW (no compression)
+  encode song.mp3 -n 4                           4ch (louder, slight roughness)
 
 compression modes:
-  lz    DeltaLZ — lossless, ~1.3x on music
-  vq    Vector Quantization — lossy (~-3dB), ~7x with vec=8
+  vq    Vector Quantization \u2014 lossy (~-3dB), default, vec=4 (~4x)
+  lz    DeltaLZ \u2014 lossless, ~1.3x on music
   off   No compression (1 byte per sample)
 
-duration (8 kHz mono 2ch, 1MB: raw ~2:11 / DeltaLZ ~2:50 / VQ ~15:12)""")
+note: --asm output is not yet supported with VQ compression.""")
 
     parser.add_argument('input',
                         help='Input audio file (WAV, MP3, FLAC, OGG, MOD, ...)')
+
+    # Output targets
+    xex_group = parser.add_mutually_exclusive_group()
+    xex_group.add_argument('-x', '--xex', action='store_true', default=True,
+                           dest='xex',
+                           help='Generate .xex binary (default: ON)')
+    xex_group.add_argument('--no-xex', action='store_false', dest='xex',
+                           help='Skip .xex generation')
+    parser.add_argument('-a', '--asm', action='store_true', default=False,
+                        help='Generate MADS assembly project (default: OFF)')
+
     parser.add_argument('-o', '--output', default=None,
-                        help='Output .xex file or directory for --asm (default: <input>.xex)')
+                        help='Output base name (adds .xex / _asm automatically)')
+
+    # Compression
+    parser.add_argument('-c', '--compression', choices=['off', 'lz', 'vq'], default='vq',
+                        help='Compression: vq (default), lz (DeltaLZ), off (raw)')
+    parser.add_argument('-s', '--vec-size', type=int, choices=[4, 8, 16], default=4,
+                        help='VQ vector size (default: 4). Only used with -c vq')
+
+    # Audio
     parser.add_argument('-r', '--rate', type=int, default=8000,
                         help='Sample rate in Hz (default: 8000). Lower = longer duration')
-    parser.add_argument('--mode', choices=['1cps', 'scalar'], default='scalar',
-                        help='Encoding: scalar (default) or 1cps (1 write/IRQ, 12+ kHz)')
     parser.add_argument('-n', '--channels', type=int, choices=[1, 2, 3, 4], default=2,
                         help='POKEY channels (1-4, default 2). More = louder but rougher')
-    parser.add_argument('--asm', action='store_true',
-                        help='Output MADS assembly project instead of XEX')
-    parser.add_argument('-c', '--compression', choices=['off', 'lz', 'vq'], default='lz',
-                        help='Compression: off, lz (DeltaLZ, default), vq (Vector Quantization)')
-    parser.add_argument('-s', '--vec-size', type=int, choices=[4, 8, 16], default=8,
-                        help='VQ vector size (default: 8). Only used with -c vq')
     parser.add_argument('-e', '--enhance', action='store_true',
                         help='Treble pre-emphasis to compensate POKEY DAC rolloff')
+    parser.add_argument('--mode', choices=['1cps', 'scalar'], default='scalar',
+                        help='LZ encoding: scalar (default) or 1cps (1 write/IRQ, 12+ kHz)')
+
+    # Advanced
     parser.add_argument('--max-banks', type=int, default=MAX_BANKS,
                         help=f'Max extended memory banks (default: {MAX_BANKS})')
     parser.add_argument('--no-noise-shaping', action='store_true',
@@ -138,7 +166,16 @@ duration (8 kHz mono 2ch, 1MB: raw ~2:11 / DeltaLZ ~2:50 / VQ ~15:12)""")
                         help='Show compression verification details')
 
     args = parser.parse_args(argv)
-    # compression stays as string: 'off', 'lz', 'vq'
+
+    # Validate: at least one output target
+    if not args.xex and not args.asm:
+        parser.error("Nothing to do \u2014 both --no-xex and no --asm. "
+                     "Use -x/--xex or -a/--asm to select an output.")
+
+    # Validate: ASM + VQ not supported (yet)
+    if args.asm and args.compression == 'vq':
+        parser.error("--asm output is not yet supported with VQ compression. "
+                     "Use -c lz or -c off with --asm, or drop --asm for XEX-only.")
 
     try:
         return run(args)
@@ -156,22 +193,40 @@ duration (8 kHz mono 2ch, 1MB: raw ~2:11 / DeltaLZ ~2:50 / VQ ~15:12)""")
         return 2
 
 
+def _derive_paths(args):
+    """Derive XEX and ASM output paths from args."""
+    if args.output:
+        base = args.output
+        # Strip .xex extension if given
+        if base.lower().endswith('.xex'):
+            base = base[:-4]
+        # Strip _asm suffix if given
+        if base.endswith('_asm'):
+            base = base[:-4]
+    else:
+        base = os.path.splitext(args.input)[0]
+
+    xex_path = base + '.xex' if args.xex else None
+    asm_path = base + '_asm' if args.asm else None
+    return xex_path, asm_path
+
+
 def run(args) -> int:
     """Execute the conversion pipeline."""
     t0 = time.time()
 
-    # ── Derive output path ──
-    if args.output:
-        output_path = args.output
-    elif args.asm:
-        base = os.path.splitext(args.input)[0]
-        output_path = base + '_asm'
-    else:
-        base = os.path.splitext(args.input)[0]
-        output_path = base + '.xex'
+    xex_path, asm_path = _derive_paths(args)
 
-    # ── 1. Load audio ──
-    print(f"Loading: {args.input}")
+    # Show what we'll generate
+    targets = []
+    if xex_path:
+        targets.append(os.path.basename(xex_path))
+    if asm_path:
+        targets.append(asm_path + '/')
+    print(f"Output: {', '.join(targets)}")
+
+    # \u2500\u2500 1. Load audio \u2500\u2500
+    print(f"\nLoading: {args.input}")
     audio, src_rate, n_channels = load_audio(args.input)
 
     n_samples = audio.shape[0]
@@ -183,30 +238,31 @@ def run(args) -> int:
     if input_duration < 0.1:
         raise AudioLoadError("Audio too short (< 0.1 seconds)")
 
-    # ── 2. Find POKEY divisor ──
+    # \u2500\u2500 2. Find POKEY divisor \u2500\u2500
     divisor, actual_rate, audctl = find_best_divisor(args.rate)
     clk_name = "1.77MHz" if (audctl & 0x40) else "64kHz"
     print(f"\nPOKEY timer:")
-    print(f"  Requested: {args.rate} Hz → divisor ${divisor:02X}, AUDCTL=${audctl:02X} ({clk_name})")
+    print(f"  Requested: {args.rate} Hz \u2192 divisor ${divisor:02X}, AUDCTL=${audctl:02X} ({clk_name})")
     print(f"  Actual: {actual_rate:.1f} Hz")
 
-    # ── 3. Resample ──
+    # \u2500\u2500 3. Resample \u2500\u2500
     if abs(src_rate - actual_rate) / actual_rate > 0.001:
-        print(f"\nResampling {src_rate} Hz → {actual_rate:.0f} Hz...")
+        print(f"\nResampling {src_rate} Hz \u2192 {actual_rate:.0f} Hz...")
         audio_rs = resample(audio, src_rate, int(actual_rate))
         print(f"  Output: {audio_rs.shape[0]:,} samples")
     else:
         audio_rs = audio
         print(f"\n  Sample rate matches, no resampling needed.")
 
-    # ── 4. Encode to POKEY format ──
+    # \u2500\u2500 4. Encode to POKEY format \u2500\u2500
     ch_mode = "mono"
     noise_shaping = not args.no_noise_shaping
     bytes_per_sec = actual_rate
     truncated = False
+    enc_mode = 'scalar'
 
     if args.compression == 'vq':
-        # ── VQ mode ──
+        # \u2500\u2500 VQ mode \u2500\u2500
         from .vq import vq_encode_banks, vq_bank_geometry
         vs = args.vec_size
         cb_b, ipb, spb = vq_bank_geometry(vs)
@@ -227,7 +283,7 @@ def run(args) -> int:
             pct = done / total if total else 1
             bar_w = 30
             filled = int(bar_w * pct)
-            bar = '█' * filled + '░' * (bar_w - filled)
+            bar = '\u2588' * filled + '\u2591' * (bar_w - filled)
             print(f"\r  [{bar}] {pct*100:.1f}%  {done:,}/{total:,} samples, "
                   f"{n_banks} banks", end='', flush=True)
 
@@ -251,19 +307,20 @@ def run(args) -> int:
                   f"({lost:,} samples) to fit available memory.")
         else:
             print(f"  {len(vq_banks)} banks, "
-                  f"{compression:.1f}× compression (vec_size={vs})")
+                  f"{compression:.1f}\u00d7 compression (vec_size={vs})")
 
         banks = vq_banks
         portb = bank_portb_table(len(banks))
+        mode_label = f'VQ{vs}'
 
     elif args.compression == 'lz':
-        # ── DeltaLZ mode ──
+        # \u2500\u2500 DeltaLZ mode \u2500\u2500
         enc_mode = args.mode
-        mode_label = f"1CPS" if enc_mode == '1cps' else f"{args.channels}-channel"
+        mode_label_enc = f"1CPS" if enc_mode == '1cps' else f"{args.channels}-channel"
         ns_label = 'noise-shaped' if noise_shaping else 'nearest'
         if args.enhance:
             ns_label += '+enhanced'
-        print(f"\nEncoding ({ch_mode}, {mode_label}, {ns_label})...")
+        print(f"\nEncoding ({ch_mode}, {mode_label_enc}, {ns_label})...")
         indices = encode_indices(audio_rs, n_channels, False, noise_shaping,
                                 sample_rate=int(actual_rate), pokey_channels=args.channels,
                                 mode=enc_mode, enhance=args.enhance)
@@ -308,9 +365,10 @@ def run(args) -> int:
 
         banks = compressed_banks
         portb = bank_portb_table(len(banks))
+        mode_label = '1CPS-DeltaLZ' if enc_mode == '1cps' else 'DeltaLZ'
 
     else:
-        # ── RAW mode ──
+        # \u2500\u2500 RAW mode \u2500\u2500
         ns_label = 'noise-shaped' if noise_shaping else 'nearest'
         if args.enhance:
             ns_label += '+enhanced'
@@ -338,100 +396,121 @@ def run(args) -> int:
         portb = bank_portb_table(len(banks))
         print(f"\n  {len(banks)} banks, "
               f"{sum(len(b) for b in banks):,} bytes")
-
-    # ── 5. Build output ──
-    if args.compression == 'vq':
-        mode_label = f'VQ{args.vec_size}'
-    elif args.compression == 'lz':
-        enc_mode = args.mode
-        mode_label = '1CPS-DeltaLZ' if enc_mode == '1cps' else 'DeltaLZ'
-    else:
         mode_label = 'RAW'
 
-    if args.asm:
-        if args.compression == 'vq':
-            raise EncodingError("--asm output is not yet supported with VQ compression. "
-                                "Use XEX output (default) instead.")
-        # ── ASM output: generate MADS project ──
-        from .asm_output import generate_asm_project
-        print(f"\nGenerating MADS assembly project ({mode_label}, {len(banks)} banks)...")
-        source_name = os.path.basename(args.input)
-        asm_path = generate_asm_project(
-            output_dir=output_path,
-            banks=banks,
-            portb_table=portb,
-            divisor=divisor,
-            audctl=audctl,
-            stereo=False,
-            compressed=(args.compression == 'lz'),
-            actual_rate=actual_rate,
-            duration=encoded_duration,
-            source_name=source_name,
-            pokey_channels=args.channels,
-        )
+    # \u2500\u2500 5. Build outputs \u2500\u2500
+    if xex_path:
+        _build_xex_output(args, banks, portb, divisor, audctl, actual_rate,
+                          mode_label, ch_mode, enc_mode, encoded_duration,
+                          input_duration, truncated, xex_path, t0)
 
-        elapsed = time.time() - t0
-        total_bin = sum(len(b) for b in banks)
+    if asm_path:
+        _build_asm_output(args, banks, portb, divisor, audctl, actual_rate,
+                          mode_label, ch_mode, enc_mode, encoded_duration,
+                          input_duration, truncated, asm_path, t0)
 
-        print(f"\n{'=' * 50}")
-        print(f"  {output_path}/")
-        print(f"  stream_player.asm + {len(banks)} bank files")
-        print(f"  {total_bin // 1024} KB bank data, {mode_label} {ch_mode}")
-        print(f"  {actual_rate:.0f} Hz (POKEY div ${divisor:02X}, AUDCTL=${audctl:02X})")
-        if truncated:
-            print(f"  Encoded: {_fmt_duration(encoded_duration)} "
-                  f"of {_fmt_duration(input_duration)} (truncated to fit)")
-        else:
-            print(f"  Duration: {_fmt_duration(encoded_duration)}")
-        print(f"  Generated in {elapsed:.1f}s")
-        print(f"{'=' * 50}")
-        print(f"\n  Assemble with: cd {output_path} && mads stream_player.asm -o:stream_player.xex")
-
+    # \u2500\u2500 6. Memory requirement summary \u2500\u2500
+    n = len(banks)
+    ram_kb = n * 16 + 64
+    if n == 0:
+        config = "64KB (base XL/XE)"
+    elif n <= 4:
+        config = "128KB (130XE)"
+    elif n <= 16:
+        config = "320KB (Rambo/Compy-Shop)"
+    elif n <= 32:
+        config = "576KB (512KB expansion)"
     else:
-        # ── XEX output: build binary directly ──
-        if args.compression == 'vq':
-            from .player_code import build_vq_player
-            player_code, player_origin, start_addr = build_vq_player(
-                divisor, audctl, len(banks), portb, False,
-                pokey_channels=args.channels, vec_size=args.vec_size,
-                sample_rate=actual_rate)
-        elif args.compression == 'lz':
-            player_code, player_origin, start_addr = build_lzsa_player(
-                divisor, audctl, len(banks), portb, False,
-                pokey_channels=args.channels, mode=enc_mode,
-                sample_rate=actual_rate)
-        else:
-            player_code, player_origin, start_addr = build_raw_player(
-                divisor, audctl, len(banks), portb, False,
-                pokey_channels=args.channels,
-                sample_rate=actual_rate)
-
-        print(f"\nBuilding XEX ({mode_label}, {len(banks)} banks)...")
-        from .player_code import build_charset_copy_init
-        charset_init = build_charset_copy_init()
-        xex_data = build_xex(player_code, player_origin, banks, start_addr,
-                             charset_init=charset_init)
-
-        with open(output_path, 'wb') as f:
-            f.write(xex_data)
-
-        elapsed = time.time() - t0
-        xex_kb = len(xex_data) / 1024
-
-        print(f"\n{'=' * 50}")
-        print(f"  {os.path.basename(output_path)}")
-        print(f"  {xex_kb:.1f} KB, {len(banks)} banks, {mode_label} {ch_mode}")
-        print(f"  {actual_rate:.0f} Hz (POKEY div ${divisor:02X})")
-        if truncated:
-            print(f"  Encoded: {_fmt_duration(encoded_duration)} "
-                  f"of {_fmt_duration(input_duration)} (truncated to fit)")
-        else:
-            print(f"  Duration: {_fmt_duration(encoded_duration)}")
-        print(f"  Built in {elapsed:.1f}s")
-        print(f"{'=' * 50}")
-
-    if len(banks) >= 4:
-        print(f"\n  Requires {len(banks)} extended memory banks "
-              f"({len(banks) * 16}KB).")
+        config = "1088KB (1MB expansion)"
+    print(f"\n  Minimum memory: {ram_kb}KB ({n} extended banks)")
+    print(f"  Requires at least: {config}")
 
     return 0
+
+
+def _build_xex_output(args, banks, portb, divisor, audctl, actual_rate,
+                      mode_label, ch_mode, enc_mode, encoded_duration,
+                      input_duration, truncated, xex_path, t0):
+    """Build and write XEX binary."""
+    if args.compression == 'vq':
+        from .player_code import build_vq_player
+        player_code, player_origin, start_addr = build_vq_player(
+            divisor, audctl, len(banks), portb, False,
+            pokey_channels=args.channels, vec_size=args.vec_size,
+            sample_rate=actual_rate)
+    elif args.compression == 'lz':
+        player_code, player_origin, start_addr = build_lzsa_player(
+            divisor, audctl, len(banks), portb, False,
+            pokey_channels=args.channels, mode=enc_mode,
+            sample_rate=actual_rate)
+    else:
+        player_code, player_origin, start_addr = build_raw_player(
+            divisor, audctl, len(banks), portb, False,
+            pokey_channels=args.channels,
+            sample_rate=actual_rate)
+
+    print(f"\nBuilding XEX ({mode_label}, {len(banks)} banks)...")
+    from .player_code import build_charset_copy_init, build_mem_detect_init
+    charset_init = build_charset_copy_init()
+    mem_detect_init = build_mem_detect_init()
+    xex_data = build_xex(player_code, player_origin, banks, start_addr,
+                         charset_init=charset_init,
+                         mem_detect_init=mem_detect_init)
+
+    with open(xex_path, 'wb') as f:
+        f.write(xex_data)
+
+    elapsed = time.time() - t0
+    xex_kb = len(xex_data) / 1024
+
+    print(f"\n{'=' * 50}")
+    print(f"  {os.path.basename(xex_path)}")
+    print(f"  {xex_kb:.1f} KB, {len(banks)} banks, {mode_label} {ch_mode}")
+    print(f"  {actual_rate:.0f} Hz (POKEY div ${divisor:02X})")
+    if truncated:
+        print(f"  Encoded: {_fmt_duration(encoded_duration)} "
+              f"of {_fmt_duration(input_duration)} (truncated to fit)")
+    else:
+        print(f"  Duration: {_fmt_duration(encoded_duration)}")
+    print(f"  Built in {elapsed:.1f}s")
+    print(f"{'=' * 50}")
+
+
+def _build_asm_output(args, banks, portb, divisor, audctl, actual_rate,
+                      mode_label, ch_mode, enc_mode, encoded_duration,
+                      input_duration, truncated, asm_dir, t0):
+    """Generate MADS assembly project."""
+    from .asm_output import generate_asm_project
+
+    print(f"\nGenerating MADS assembly project ({mode_label}, {len(banks)} banks)...")
+    source_name = os.path.basename(args.input)
+    generate_asm_project(
+        output_dir=asm_dir,
+        banks=banks,
+        portb_table=portb,
+        divisor=divisor,
+        audctl=audctl,
+        stereo=False,
+        compressed=(args.compression == 'lz'),
+        actual_rate=actual_rate,
+        duration=encoded_duration,
+        source_name=source_name,
+        pokey_channels=args.channels,
+    )
+
+    elapsed = time.time() - t0
+    total_bin = sum(len(b) for b in banks)
+
+    print(f"\n{'=' * 50}")
+    print(f"  {asm_dir}/")
+    print(f"  stream_player.asm + {len(banks)} bank files")
+    print(f"  {total_bin // 1024} KB bank data, {mode_label} {ch_mode}")
+    print(f"  {actual_rate:.0f} Hz (POKEY div ${divisor:02X}, AUDCTL=${audctl:02X})")
+    if truncated:
+        print(f"  Encoded: {_fmt_duration(encoded_duration)} "
+              f"of {_fmt_duration(input_duration)} (truncated to fit)")
+    else:
+        print(f"  Duration: {_fmt_duration(encoded_duration)}")
+    print(f"  Generated in {elapsed:.1f}s")
+    print(f"{'=' * 50}")
+    print(f"\n  Assemble with: cd {asm_dir} && mads stream_player.asm -o:stream_player.xex")
