@@ -1125,7 +1125,7 @@ def build_vq_player(pokey_divisor, audctl, n_banks, portb_table, stereo,
       - Every vec_size IRQs: bank-in, read 1 index byte, bank-out
       - Bank transition: main loop copies new codebook (SEI, ~10ms)
     """
-    assert vec_size in (4, 8, 16)
+    assert vec_size in (2, 4, 8, 16)
     cb_bytes = 256 * vec_size
     idx_start_lo = (BANK_BASE + cb_bytes) & 0xFF
     idx_start_hi = ((BANK_BASE + cb_bytes) >> 8) & 0xFF

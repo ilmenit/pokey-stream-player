@@ -1,6 +1,6 @@
 """VQ (Vector Quantization) compression with per-bank codebook.
 
-Encodes POKEY sample indices as fixed-length vectors (4, 8, or 16 samples).
+Encodes POKEY sample indices as fixed-length vectors (2, 4, 8, or 16 samples).
 Each 16 KB bank stores its own 256-entry codebook + index stream.
 
 Bank format:
@@ -9,12 +9,23 @@ Bank format:
 
 Each index byte selects a codebook vector -> vec_size output samples.
 
+  vec_size=2:   codebook= 512B   indices/bank=15872  samples/bank= 31,744
   vec_size=4:   codebook=1024B   indices/bank=15360  samples/bank= 61,440
   vec_size=8:   codebook=2048B   indices/bank=14336  samples/bank=114,688
   vec_size=16:  codebook=4096B   indices/bank=12288  samples/bank=196,608
 
 The player copies each bank's codebook to main RAM at bank start,
 then reads samples via VQ_LO/VQ_HI address lookup tables.
+
+IMPORTANT: Input indices should be encoded WITHOUT noise shaping.
+Noise shaping spreads quantization error into patterns that k-means
+cannot efficiently represent, degrading VQ SNR by ~3 dB.  Plain
+rounding produces vectors like [15,15,15,15] that get exact codebook
+matches.  Noise-shaped [14,16,15,14] gets poorly approximated.
+
+Codebook index 0 is reserved for silence when the bank contains
+near-silent vectors, ensuring quiet sections play back as true
+silence and bank padding (zero bytes) decodes cleanly.
 """
 
 import numpy as np
@@ -210,8 +221,8 @@ def vq_encode_banks(indices, vec_size=8, max_banks=64,
     Returns:
         (banks, samples_encoded)
     """
-    if vec_size not in (4, 8, 16):
-        raise CompressionError(f"vec_size must be 4, 8, or 16, got {vec_size}")
+    if vec_size not in (2, 4, 8, 16):
+        raise CompressionError(f"vec_size must be 2, 4, 8, or 16, got {vec_size}")
 
     # Accept bytes or numpy array
     if isinstance(indices, (bytes, bytearray)):

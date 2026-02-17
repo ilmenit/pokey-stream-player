@@ -74,7 +74,8 @@ def _print_usage():
 
   COMPRESSION:
     -c off|lz|vq              Compression mode (default: vq)
-    -s 4|8|16                 VQ vector size (default: 4)
+    -s 2|4|8|16               VQ vector size (default: 4)
+                              2=best quality, 4=good balance, 8/16=max compression
 
   AUDIO:
     -n 1|2|3|4                POKEY channels (default: 2)
@@ -91,11 +92,11 @@ def _print_usage():
     MOD, XM, S3M, IT, SID, ... (require ffmpeg installed)
 
   MEMORY & DURATION (8 kHz, mono, 2ch):
-    Memory              Raw     DeltaLZ    VQ (vec=4)
-    130XE (64KB)        ~8s      ~10s       ~32s
-    256KB               ~32s     ~42s       ~2:08
-    512KB               1:05     ~1:25      ~4:16
-    1MB                 2:11     ~2:50      ~8:32
+    Memory              Raw     DeltaLZ    VQ4        VQ2
+    130XE (64KB)        ~8s      ~10s       ~32s       ~16s
+    256KB               ~32s     ~42s       ~2:08      ~1:04
+    512KB               1:05     ~1:25      ~4:16      ~2:08
+    1MB                 2:11     ~2:50      ~8:32      ~4:16
 """)
 
 
@@ -119,7 +120,7 @@ def main(argv=None):
   encode song.mp3 -n 4                           4ch (louder, slight roughness)
 
 compression modes:
-  vq    Vector Quantization \u2014 lossy (~-3dB), default, vec=4 (~4x)
+  vq    Vector Quantization \u2014 lossy, default, vec=4 (~4x) or vec=2 (near-transparent ~2x)
   lz    DeltaLZ \u2014 lossless, ~1.3x on music
   off   No compression (1 byte per sample)
 
@@ -144,8 +145,8 @@ note: --asm output is not yet supported with VQ compression.""")
     # Compression
     parser.add_argument('-c', '--compression', choices=['off', 'lz', 'vq'], default='vq',
                         help='Compression: vq (default), lz (DeltaLZ), off (raw)')
-    parser.add_argument('-s', '--vec-size', type=int, choices=[4, 8, 16], default=4,
-                        help='VQ vector size (default: 4). Only used with -c vq')
+    parser.add_argument('-s', '--vec-size', type=int, choices=[2, 4, 8, 16], default=4,
+                        help='VQ vector size (default: 4). Smaller = better quality, less compression')
 
     # Audio
     parser.add_argument('-r', '--rate', type=int, default=8000,
@@ -267,11 +268,11 @@ def run(args) -> int:
         vs = args.vec_size
         cb_b, ipb, spb = vq_bank_geometry(vs)
 
-        ns_label = 'noise-shaped' if noise_shaping else 'nearest'
+        ns_label = 'nearest (VQ-optimal)'
         if args.enhance:
             ns_label += '+enhanced'
         print(f"\nEncoding ({ch_mode}, {args.channels}-channel, {ns_label})...")
-        indices = encode_indices(audio_rs, n_channels, False, noise_shaping,
+        indices = encode_indices(audio_rs, n_channels, False, False,
                                 sample_rate=int(actual_rate),
                                 pokey_channels=args.channels, mode='scalar',
                                 enhance=args.enhance)
