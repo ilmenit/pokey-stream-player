@@ -46,26 +46,37 @@ MODE_VQ = 2
 BANK_BASE = 0x4000
 
 
-def _asm_dir():
-    """Return path to the static asm/ directory shipped with the package."""
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        '..', 'asm')
-
-
 def _normalize_asm_dir():
-    """Find the asm/ directory, trying multiple locations."""
-    # Try relative to this file: ../../../asm/
-    candidate = os.path.normpath(_asm_dir())
-    if os.path.isdir(candidate):
-        return candidate
-    # Try relative to package root
+    """Find the asm/ directory, trying multiple locations.
+
+    Search order:
+      1. PyInstaller bundle (sys._MEIPASS/asm/)
+      2. Next to the executable (for frozen one-dir builds)
+      3. Relative to this source file (development layout)
+    """
+    candidates = []
+
+    # PyInstaller onefile: extracted to temp dir
+    if hasattr(sys, '_MEIPASS'):
+        candidates.append(os.path.join(sys._MEIPASS, 'asm'))
+
+    # Next to the running executable (frozen one-dir or user placement)
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    candidates.append(os.path.join(exe_dir, 'asm'))
+
+    # Development layout: src/stream_player/../../asm → project_root/asm
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for parent in [pkg_dir, os.path.dirname(pkg_dir)]:
-        candidate = os.path.join(parent, 'asm')
-        if os.path.isdir(candidate):
-            return candidate
+    candidates.append(os.path.normpath(os.path.join(pkg_dir, '..', 'asm')))
+    candidates.append(os.path.join(pkg_dir, 'asm'))
+    candidates.append(os.path.normpath(os.path.join(pkg_dir, '..', '..', 'asm')))
+
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+
     raise FileNotFoundError(
-        f"Cannot find asm/ directory. Looked in: {_asm_dir()}")
+        "Cannot find asm/ directory. Searched:\n  " +
+        "\n  ".join(candidates))
 
 
 def generate_project(output_dir, banks, compress_mode, divisor, audctl,
@@ -351,24 +362,34 @@ def _find_mads(project_dir):
     """Search for the MADS assembler binary.
 
     Checks (in order):
-      1. project_dir/mads  (or mads.exe on Windows)
-      2. System PATH
+      1. project_dir/mads  (output directory)
+      2. Next to the running executable (frozen builds)
+      3. PyInstaller bundle (sys._MEIPASS/bin/)
+      4. System PATH
 
     Returns:
         Absolute path to MADS binary, or None if not found.
     """
-    import platform
-    name = 'mads.exe' if platform.system() == 'Windows' else 'mads'
+    import platform as _platform
+    name = 'mads.exe' if _platform.system() == 'Windows' else 'mads'
 
-    # Check project directory
-    local = os.path.join(project_dir, name)
-    if os.path.isfile(local) and os.access(local, os.X_OK):
-        return os.path.abspath(local)
+    candidates = [
+        os.path.join(project_dir, name),
+        os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name),
+    ]
 
-    # Check PATH
+    # PyInstaller bundle may include mads in bin/
+    if hasattr(sys, '_MEIPASS'):
+        candidates.append(os.path.join(sys._MEIPASS, 'bin', name))
+        candidates.append(os.path.join(sys._MEIPASS, name))
+
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(path)
+
+    # Check system PATH
     import shutil as _shutil
-    found = _shutil.which(name)
-    return found
+    return _shutil.which(name)
 
 
 def try_assemble(output_dir):

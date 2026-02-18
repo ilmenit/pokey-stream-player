@@ -185,8 +185,12 @@ double buffering, no audio gaps.
 
 ```
 stream-player/
-├── encode.sh           Linux/macOS launcher
-├── encode.bat          Windows launcher
+├── encode.sh           Linux/macOS dev launcher
+├── encode.bat          Windows dev launcher
+├── build.sh            Linux/macOS build script (→ standalone executable)
+├── build.bat           Windows build script (→ standalone executable)
+├── encode.spec         PyInstaller spec file
+├── encode_entry.py     Entry point for frozen executable
 ├── requirements.txt    Python dependencies (numpy, scipy, soundfile)
 ├── README.md
 ├── asm/                Static assembly templates (copied into projects)
@@ -211,6 +215,54 @@ stream-player/
 └── tests/
     └── test_stream_player.py
 ```
+
+## Building standalone executable
+
+You can build a single-file `encode` / `encode.exe` binary that requires
+no Python installation to run. Uses [PyInstaller](https://pyinstaller.org).
+
+### Quick build
+
+```bash
+# Windows
+build.bat
+
+# Linux / macOS
+chmod +x build.sh
+./build.sh
+```
+
+The executable appears in `dist/encode` (or `dist\encode.exe` on Windows).
+
+### Build commands
+
+| Command | Description |
+|---|---|
+| `build.bat` / `./build.sh` | Build the executable |
+| `build.bat dist` / `./build.sh dist` | Build + create distribution zip/tar.gz |
+| `build.bat clean` / `./build.sh clean` | Remove build artifacts |
+| `build.bat check` / `./build.sh check` | Check dependencies without building |
+| `build.bat install` / `./build.sh install` | Install Python dependencies only |
+
+### Distribution contents
+
+Running `build dist` creates a release folder with:
+
+```
+pokey-stream-player/
+├── encode.exe       The standalone executable
+├── mads.exe         MADS assembler (if found in bin/platform/)
+├── README.md
+└── LICENSE
+```
+
+Place `mads` / `mads.exe` next to `encode` to use the external MADS
+assembler. Without it, the built-in assembler handles everything.
+
+### Build requirements
+
+Python 3.8+ with: `numpy`, `scipy`, `soundfile`, `pyinstaller`.
+The build script installs these automatically.
 
 ## Running tests
 
