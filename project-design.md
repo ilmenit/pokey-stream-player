@@ -59,8 +59,8 @@ Audio File (WAV/MP3/FLAC)
 │  4. Quantize to POKEY levels    │
 │  5. Compress (VQ / LZ / raw)    │
 │  6. Pack into 16 KB banks       │
-│  7. Generate 6502 player code   │
-│  8. Build XEX binary            │
+│  7. Generate assembly project   │
+│  8. Assemble → XEX binary       │
 └──────────┬──────────────────────┘
            │
      ┌─────┴──────┐
@@ -70,19 +70,23 @@ Audio File (WAV/MP3/FLAC)
    run)          for hacking)
 ```
 
-### Two Output Paths
+### How XEX Gets Built
 
-**XEX (default):** Python generates 6502 machine code directly using
-`_CodeBuilder` (a Python-hosted assembler in `player_code.py`) and packs
-everything into a single XEX binary. This path supports all three
-compression modes (VQ, LZ, RAW) and requires no external tools.
+The encoder generates a self-contained 6502 assembly project (MADS-
+compatible source files + per-song data), then assembles it into a
+single XEX binary. Assembly is handled by:
 
-**ASM project (`--asm`):** Python generates per-song data files and copies
-static hand-written MADS assembly source files into an output directory.
-The user (or Python, if MADS is found) assembles them with the MADS
-assembler. This path currently supports VQ mode. It exists because the
-hand-written assembly is far more readable, maintainable, and auditable
-than 1300 lines of `c.lda_imm(0x10); c.sta_abs(AUDC1)` in Python.
+1. **External MADS** — if `mads` / `mads.exe` is found next to the
+   encoder or in the system PATH, it is used automatically.
+2. **Built-in assembler** — a MADS-compatible subset (`simple_mads`)
+   bundled with the encoder. Covers all instructions, addressing modes,
+   directives, and conditional assembly needed by the player. Requires
+   no external tools.
+
+The method used is shown in the output: `[mads]` or `[built-in]`.
+
+The `-a` flag saves the assembly project to disk so it can be inspected,
+modified, or built manually with MADS.
 
 
 ## Encoding Pipeline
@@ -197,9 +201,17 @@ vectors like [15, 15, 15, 15] that get exact codebook matches. Noise-shaped
 [14, 16, 15, 14] gets approximated with ±1 error per element, creating
 audible white noise. This single insight improved SNR by 3.4 dB.
 
-Codebook index 0 is reserved for silence when a bank contains near-silent
-vectors, ensuring quiet sections play as true silence and that zero-byte
-padding at bank boundaries decodes cleanly.
+**Noise gate (`-g N`).** Controls how aggressively near-silence is
+snapped to true zero (0–100%, default 5).  When gate > 0, codebook
+index 0 is reserved for silence `[0,0,...,0]` and vectors where every
+sample falls below `max_level × gate / 100` are excluded from k-means
+training.  The default of 5% is very mild — it only catches vectors
+that are essentially zero already.  Higher values (20–50) clean up
+noisy sources but may suppress quiet passages.
+
+With `-g 0`, all 256 codebook entries are trained on the actual data.
+A silence entry is still ensured (replacing the least-used code) so
+that zero-padded bank tails decode cleanly.
 
 #### DeltaLZ (Lossless)
 
@@ -350,10 +362,12 @@ The OS ROM charset has already been copied to RAM by the INIT segment, so
 ANTIC can read character definitions even though ROM is disabled.
 
 
-## The MADS Assembly Architecture
+## The Assembly Architecture
 
-The `--asm` flag generates a self-contained MADS assembler project. The
-key design principle is **separation of static code from generated data**:
+The encoder generates a self-contained assembly project for each song.
+The project combines static player code (in the `asm/` directory, shared
+across all songs) with generated data files (per-song configuration,
+AUDC tables, bank data).
 
 ### Static Files (in `asm/`, version-controlled)
 
@@ -361,26 +375,25 @@ key design principle is **separation of static code from generated data**:
 |------|---------|
 | `stream_player.asm` | Master file, includes everything via `icl` |
 | `atari.inc` | Hardware register definitions and constants |
-| `zeropage_vq.inc` | Zero page variable allocations ($80–$8F) |
+| `zeropage_{vq,lz,raw}.inc` | Zero page variable allocations ($80–$8F) |
 | `copy_rom.asm` | INIT: copy OS ROM to RAM (with PORTB toggle) |
 | `mem_detect.asm` | INIT: detect extended RAM banks |
 | `splash.asm` | Startup, memory check, splash screen, key wait |
-| `player_vq.asm` | Play init, main loop, bank transitions |
-| `irq_vq.asm` | VQ IRQ handler with conditional assembly |
+| `player_{vq,lz,raw}.asm` | Play init, main loop, bank transitions |
+| `irq_{vq,lz,raw}.asm` | IRQ handler with conditional assembly |
 | `pokey_setup.asm` | POKEY timer and channel initialization |
 
-### Generated Files (per-song, from `asm_gen_vq.py`)
+### Generated Files (per-song, from `asm_project.py`)
 
 | File | Purpose |
 |------|---------|
 | `config.asm` | Constants: N_BANKS, VEC_SIZE, POKEY_CHANNELS, etc. |
-| `audc_tables.asm` | 256-byte AUDC LUTs per channel |
-| `portb_table.asm` | Placeholder PORTB table (filled at runtime) |
-| `vq_tables.asm` | VQ_LO/VQ_HI: codebook index → address lookup |
+| `audc_tables.asm` | 256-byte AUDC lookup tables per channel |
+| `portb_table.asm` | PORTB bank-select table (filled at runtime) |
+| `vq_tables.asm` | VQ_LO/VQ_HI: codebook index → address lookup (VQ only) |
 | `splash_data.asm` | Screen text in ANTIC Mode 2 screen codes |
 | `bank_XX.asm` | Per-bank codebook + index data as `.byte` arrays |
 | `banks.asm` | INIT stubs for loading banks into extended RAM |
-| `build.sh` / `.bat` | Build scripts |
 
 ### Conditional Assembly
 
@@ -395,8 +408,8 @@ for the configured number of channels:
 ```
 
 This means the same `irq_vq.asm` source handles all 1–4 channel
-configurations. Similarly, the splash screen memory check is only assembled
-when `N_BANKS > 0`.
+configurations. Similarly, `stream_player.asm` includes the correct
+player/IRQ/zeropage files based on the `COMPRESS_MODE` constant.
 
 
 ## Key Design Decisions
@@ -429,9 +442,9 @@ improvement: 14.5 dB → 17.9 dB SNR for vec_size=4.
 
 ### Why Direct Bank Read Instead of Codebook Copy
 
-The original architecture copied each bank's codebook (256 × vec_size
+An alternative architecture would copy each bank's codebook (256 × vec_size
 bytes, up to 4 KB) to main RAM when switching banks, so the IRQ could read
-from a fixed address without bank switching. This required disabling
+from a fixed address without bank switching. This would require disabling
 interrupts during the copy — a 5–20 ms gap that causes an audible click
 on every bank transition.
 
@@ -487,37 +500,45 @@ other PORTB bits.
 
 ## File Reference
 
-### Python Modules
+### Python Modules (`src/stream_player/`)
 
-| Module | Lines | Purpose |
-|--------|-------|---------|
-| `cli.py` | 538 | Command-line interface, orchestrates the pipeline |
-| `audio.py` | 498 | Load, resample, DC block, normalize, quantize wrappers |
-| `tables.py` | 197 | POKEY voltage tables, multi-channel allocation, quantizers |
-| `vq.py` | 319 | VQ encoder: k-means, per-bank codebook, silence reservation |
-| `compress.py` | 401 | DeltaLZ compressor with 16 KB window tracking |
-| `enhance.py` | 250 | Treble pre-emphasis FIR, dynamics compressor (experimental) |
-| `player_code.py` | 1345 | Python-hosted 6502 assembler, generates player machine code |
-| `asm6502.py` | 206 | `_CodeBuilder` class: 6502 opcode emitter |
-| `asm_gen_vq.py` | 500 | MADS project generator for VQ mode |
-| `asm_output.py` | 944 | MADS project generator for LZ/RAW modes |
-| `layout.py` | 98 | Bank packing, PORTB tables, DBANK probe order |
-| `xex.py` | 176 | XEX binary builder |
-| `errors.py` | 25 | Exception hierarchy |
+| Module | Purpose |
+|--------|---------|
+| `cli.py` | Command-line interface, orchestrates the pipeline |
+| `audio.py` | Load, resample, DC block, normalize, quantize |
+| `tables.py` | POKEY voltage tables, multi-channel allocation, quantizers |
+| `vq.py` | VQ encoder: k-means, per-bank codebook, noise gate |
+| `compress.py` | DeltaLZ compressor with 16 KB window tracking |
+| `enhance.py` | Treble pre-emphasis FIR |
+| `asm_project.py` | Assembly project generator + MADS/built-in dispatch |
+| `layout.py` | Bank packing, PORTB tables, DBANK probe order |
+| `splash_utils.py` | Screen code conversion for splash display |
+| `errors.py` | Exception hierarchy |
 
-### Assembly Files
+### Built-in Assembler (`src/stream_player/simple_mads/`)
 
-| File | Purpose | Self-contained? |
-|------|---------|-----------------|
-| `stream_player.asm` | Master, includes all others | Yes (entry point) |
-| `atari.inc` | Hardware registers, constants | Yes (no dependencies) |
-| `zeropage_vq.inc` | ZP variable layout | Needs `atari.inc` values |
-| `copy_rom.asm` | ROM→RAM copy INIT | Has own `org` + `ini` |
-| `mem_detect.asm` | Bank detection INIT | Has own `org` + `ini` |
-| `splash.asm` | UI + startup | Needs `config.asm`, `splash_data.asm` |
-| `player_vq.asm` | Player init + main loop | Needs everything |
-| `irq_vq.asm` | IRQ handler | Needs `config.asm`, table labels |
-| `pokey_setup.asm` | POKEY init | Needs `config.asm` |
+| Module | Purpose |
+|--------|---------|
+| `parser.py` | Phase 1: source → flat statement list (parse once) |
+| `assembler.py` | Phase 2–3: resolve symbols → emit XEX binary |
+| `expressions.py` | Expression evaluator (arithmetic, lo/hi byte) |
+| `encoder.py` | 6502 instruction encoder (all addressing modes) |
+| `opcodes.py` | Opcode table (56 instructions × all modes) |
+| `xex.py` | Atari XEX binary format builder |
+
+### Assembly Files (`asm/`)
+
+| File | Purpose |
+|------|---------|
+| `stream_player.asm` | Master, includes all others via `icl` |
+| `atari.inc` | Hardware registers, constants |
+| `zeropage_{vq,lz,raw}.inc` | ZP variable layout per compression mode |
+| `copy_rom.asm` | ROM→RAM copy (INIT segment) |
+| `mem_detect.asm` | Bank detection (INIT segment) |
+| `splash.asm` | UI + startup + memory check |
+| `player_{vq,lz,raw}.asm` | Player init + main loop per mode |
+| `irq_{vq,lz,raw}.asm` | IRQ handler per mode |
+| `pokey_setup.asm` | POKEY timer and channel initialization |
 
 
 ## Building and Running
@@ -525,18 +546,29 @@ other PORTB bits.
 ### Prerequisites
 
 - Python 3.8+ with `numpy`, `scipy`, `soundfile`
-- Optional: MADS assembler (for `--asm` output)
+- Optional: MADS assembler (placed next to encoder or in PATH)
 - Atari 800XL/XE with 128KB+ RAM, or emulator (Altirra recommended)
 
 ### Quick Start
 
 ```bash
 pip install -r requirements.txt
-python -m src.stream_player song.mp3           # → song.xex
-python -m src.stream_player song.mp3 -a        # → song.xex + song_asm/
-python -m src.stream_player song.mp3 -c lz     # DeltaLZ lossless
-python -m src.stream_player song.mp3 -s 2      # VQ2 near-transparent
-python -m src.stream_player song.mp3 -n 4 -e   # 4ch + treble boost
+./encode.sh song.mp3                 # → outputs/song.xex (VQ4, 2ch, 8kHz)
+./encode.sh song.mp3 -a             # → outputs/song_asm/ (ASM project only)
+./encode.sh song.mp3 -c lz          # DeltaLZ lossless
+./encode.sh song.mp3 -s 2           # VQ2 near-transparent
+./encode.sh song.mp3 -n 4 -e        # 4ch + treble boost
+./encode.sh song.mp3 -g 0           # VQ with noise gate off
+./encode.sh song.mp3 -g 20          # VQ with stronger noise gate
+```
+
+### Standalone Executable
+
+Build a single-file `encode` / `encode.exe` with PyInstaller:
+
+```bash
+./build.sh                            # Linux/macOS → dist/encode
+build.bat                             # Windows → dist\encode.exe
 ```
 
 ### Duration Estimates (8 kHz, mono, 2ch)

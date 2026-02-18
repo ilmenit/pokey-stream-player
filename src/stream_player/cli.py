@@ -2,8 +2,8 @@
 
 Usage:
     encode song.mp3                        Default: VQ4 → XEX
-    encode song.mp3 -a                     Also save ASM project
-    encode song.mp3 --no-xex -a            ASM project only
+    encode song.mp3 -a                     ASM project only
+    encode song.mp3 -x -a                  Both XEX and ASM project
     encode song.mp3 -c lz                  DeltaLZ compression
 
 Pipeline:
@@ -56,20 +56,19 @@ def main(argv=None):
   encode song.mp3 -c off            Uncompressed (max ~2s per bank)
   encode song.mp3 -s 2              VQ2 (highest quality, less compression)
   encode song.mp3 -n 4              4-channel (louder, rougher)
-  encode song.mp3 --no-xex -a       ASM project only""")
+  encode song.mp3 -g 0              VQ with noise gate disabled
+  encode song.mp3 -g 20             VQ with stronger noise gate
+  encode song.mp3 -a                ASM project only (no XEX)
+  encode song.mp3 -x -a             Both XEX and ASM project""")
 
     parser.add_argument('input',
                         help='Input audio file (WAV, MP3, FLAC, OGG, MOD, ...)')
 
-    # Output targets
-    xex_group = parser.add_mutually_exclusive_group()
-    xex_group.add_argument('-x', '--xex', action='store_true', default=True,
-                           dest='xex',
-                           help='Generate .xex binary (default: ON)')
-    xex_group.add_argument('--no-xex', action='store_false', dest='xex',
-                           help='Skip .xex generation')
+    # Output targets: default = XEX only; -a = ASM only; -x -a = both
+    parser.add_argument('-x', '--xex', action='store_true', default=False,
+                        help='Generate .xex binary (default when -a is not given)')
     parser.add_argument('-a', '--asm', action='store_true', default=False,
-                        help='Generate assembly project (default: OFF)')
+                        help='Generate assembly project (if alone: ASM only)')
 
     parser.add_argument('-o', '--output', default=None,
                         help='Output base name (default: outputs/<input>, adds .xex / _asm)')
@@ -79,6 +78,9 @@ def main(argv=None):
                         help='Compression: vq (default), lz (DeltaLZ), off (raw)')
     parser.add_argument('-s', '--vec-size', type=int, choices=[2, 4, 8, 16], default=4,
                         help='VQ vector size (default: 4). Smaller = better quality, less compression')
+    parser.add_argument('-g', '--gate', type=int, default=5, metavar='N',
+                        help='VQ noise gate strength 0-100%% (default: 5). '
+                             '0 = off, higher = more aggressive silence gating')
 
     # Audio
     parser.add_argument('-r', '--rate', type=int, default=8000,
@@ -87,11 +89,11 @@ def main(argv=None):
                         help='POKEY channels (1-4, default 2). More = louder but rougher')
     parser.add_argument('-e', '--enhance', action='store_true',
                         help='Treble pre-emphasis to compensate POKEY DAC rolloff')
-    parser.add_argument('--mode', choices=['1cps', 'scalar'], default='scalar',
+    parser.add_argument('-m', '--mode', choices=['1cps', 'scalar'], default='scalar',
                         help='LZ encoding: scalar (default) or 1cps (1 write/IRQ, 12+ kHz)')
 
     # Advanced
-    parser.add_argument('--max-banks', type=int, default=MAX_BANKS,
+    parser.add_argument('-b', '--max-banks', type=int, default=MAX_BANKS,
                         help=f'Max extended memory banks (default: {MAX_BANKS})')
     parser.add_argument('--no-noise-shaping', action='store_true',
                         help='Disable noise shaping (slightly faster, lower quality)')
@@ -100,10 +102,13 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
 
-    # Validate: at least one output target
+    # Output logic: no flags → XEX; -a alone → ASM only; -x -a → both
     if not args.xex and not args.asm:
-        parser.error("Nothing to do — both --no-xex and no --asm. "
-                     "Use -x/--xex or -a/--asm to select an output.")
+        args.xex = True
+
+    # Validate gate range
+    if not 0 <= args.gate <= 100:
+        parser.error(f"--gate must be 0-100, got {args.gate}")
 
     try:
         return run(args)
@@ -307,6 +312,8 @@ def _encode_vq(args, audio_rs, n_channels, actual_rate, bytes_per_sec,
     ns_label = 'nearest (VQ-optimal)'
     if args.enhance:
         ns_label += '+enhanced'
+    if args.gate > 0:
+        ns_label += f'+gate{args.gate}%'
     print(f"\nEncoding (mono, {args.channels}-channel, {ns_label})...")
     indices = encode_indices(audio_rs, n_channels, False, False,
                             sample_rate=int(actual_rate),
@@ -327,7 +334,7 @@ def _encode_vq(args, audio_rs, n_channels, actual_rate, bytes_per_sec,
     vq_banks, samples_compressed = vq_encode_banks(
         indices, vec_size=vs, max_banks=args.max_banks,
         max_level=max_level(args.channels), n_iter=20,
-        progress_fn=vq_progress)
+        gate=args.gate, progress_fn=vq_progress)
     print()
 
     encoded_duration = samples_compressed / bytes_per_sec

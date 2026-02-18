@@ -192,6 +192,10 @@ if exist "README.md" (
     copy "README.md" "%RELDIR%\" >nul
     echo   [+] README.md
 )
+if exist "project-design.md" (
+    copy "project-design.md" "%RELDIR%\" >nul
+    echo   [+] project-design.md
+)
 if exist "LICENSE" (
     copy "LICENSE" "%RELDIR%\" >nul
     echo   [+] LICENSE

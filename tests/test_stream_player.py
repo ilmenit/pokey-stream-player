@@ -436,7 +436,7 @@ class TestEndToEnd(unittest.TestCase):
         try:
             self._make_test_wav(wav_path, duration=0.5)
             from stream_player.cli import main
-            result = main([wav_path, '--no-xex', '-a', '-o',
+            result = main([wav_path, '--asm', '-o',
                            wav_path.replace('.wav', '')])
             self.assertEqual(result, 0)
             self.assertTrue(os.path.isdir(asm_dir))
@@ -459,7 +459,7 @@ class TestEndToEnd(unittest.TestCase):
         try:
             self._make_test_wav(wav_path, duration=0.5)
             from stream_player.cli import main
-            result = main([wav_path, '--no-xex', '-a', '-c', 'lz', '-o',
+            result = main([wav_path, '--asm', '-c', 'lz', '-o',
                            wav_path.replace('.wav', '')])
             self.assertEqual(result, 0)
             self.assertTrue(os.path.isdir(asm_dir))
@@ -482,7 +482,7 @@ class TestEndToEnd(unittest.TestCase):
         try:
             self._make_test_wav(wav_path, duration=0.5)
             from stream_player.cli import main
-            result = main([wav_path, '--no-xex', '-a', '-c', 'off', '-o',
+            result = main([wav_path, '--asm', '-c', 'off', '-o',
                            wav_path.replace('.wav', '')])
             self.assertEqual(result, 0)
             self.assertTrue(os.path.isdir(asm_dir))

@@ -214,8 +214,9 @@ build_dist() {
     echo "  [+] encode"
 
     # Copy docs
-    [ -f "README.md" ] && cp "README.md" "$RELDIR/" && echo "  [+] README.md"
-    [ -f "LICENSE" ]   && cp "LICENSE"   "$RELDIR/" && echo "  [+] LICENSE"
+    [ -f "README.md" ]         && cp "README.md"         "$RELDIR/" && echo "  [+] README.md"
+    [ -f "project-design.md" ] && cp "project-design.md" "$RELDIR/" && echo "  [+] project-design.md"
+    [ -f "LICENSE" ]           && cp "LICENSE"            "$RELDIR/" && echo "  [+] LICENSE"
 
     # Copy MADS if available
     MADS_PATH="bin/$PLATFORM_DIR/mads"

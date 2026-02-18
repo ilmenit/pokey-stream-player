@@ -37,6 +37,12 @@ Running without arguments shows the full help screen.
 # VQ with smallest vectors — highest quality, least compression
 ./encode.sh song.mp3 -s 2
 
+# VQ with noise gate disabled (preserves all low-level detail)
+./encode.sh song.mp3 -g 0
+
+# VQ with stronger noise gate (cleans up noisy sources)
+./encode.sh song.mp3 -g 20
+
 # DeltaLZ compression (lossless, lower compression ratio)
 ./encode.sh song.mp3 -c lz
 
@@ -52,11 +58,11 @@ Running without arguments shows the full help screen.
 # Lower sample rate = longer recording fits in memory
 ./encode.sh song.mp3 -r 6000
 
-# Generate assembly project alongside the XEX
+# Assembly project only (no XEX)
 ./encode.sh song.mp3 -a
 
-# Assembly project only (no XEX)
-./encode.sh song.mp3 --no-xex -a -o my_project
+# Both XEX and assembly project
+./encode.sh song.mp3 -x -a -o my_project
 ```
 
 ### Options
@@ -65,9 +71,8 @@ Running without arguments shows the full help screen.
 
 | Option | Default | Description |
 |---|---|---|
-| `-x, --xex` | ON | Generate .xex binary. |
-| `--no-xex` | — | Skip .xex generation. Mutually exclusive with `-x`. |
-| `-a, --asm` | OFF | Generate assembly project (compatible with MADS assembler). |
+| `-x, --xex` | ON* | Generate .xex binary. *Default when `-a` is not given. |
+| `-a, --asm` | OFF | Generate assembly project. If alone: ASM only. With `-x`: both. |
 | `-o, --output FILE` | `outputs/<input>` | Output base name. Adds `.xex` and/or `_asm` suffix automatically. |
 
 **Compression:**
@@ -75,7 +80,8 @@ Running without arguments shows the full help screen.
 | Option | Default | Description |
 |---|---|---|
 | `-c, --compression {off,lz,vq}` | `vq` | Compression mode. `vq` = Vector Quantization (lossy, high ratio), `lz` = DeltaLZ (lossless), `off` = raw samples. |
-| `-s, --vec-size {2,4,8,16}` | `4` | VQ vector size. Smaller = better quality, less compression. Only used with `-c vq`. |
+| `-s, --vec-size {2,4,8,16}` | `4` | VQ vector size. Smaller = better quality, less compression. Only with `-c vq`. |
+| `-g, --gate N` | `5` | VQ noise gate strength (0–100%). 0 = off, higher = more aggressive. Snaps near-silence to true zero. Only with `-c vq`. |
 
 **Audio:**
 
@@ -84,13 +90,13 @@ Running without arguments shows the full help screen.
 | `-r, --rate RATE` | `8000` | Sample rate in Hz. Lower = longer duration, less treble. |
 | `-n, --channels {1,2,3,4}` | `2` | POKEY channels. More = louder but rougher. |
 | `-e, --enhance` | OFF | Treble pre-emphasis to compensate POKEY DAC rolloff. See below. |
-| `--mode {scalar,1cps}` | `scalar` | LZ encoding mode. `scalar` = multi-channel writes per IRQ. `1cps` = single write per IRQ (for 12+ kHz rates). Only used with `-c lz`. |
+| `-m, --mode {scalar,1cps}` | `scalar` | LZ encoding mode. `scalar` = multi-channel writes per IRQ. `1cps` = single write per IRQ (for 12+ kHz rates). Only with `-c lz`. |
 
 **Advanced:**
 
 | Option | Default | Description |
 |---|---|---|
-| `--max-banks N` | `64` | Max extended memory banks (64 = 1MB). |
+| `-b, --max-banks N` | `64` | Max extended memory banks (64 = 1MB). |
 | `--no-noise-shaping` | OFF | Disable noise shaping. Slightly faster, lower quality. |
 | `-v, --verbose` | OFF | Show compression verification details. |
 
@@ -109,6 +115,25 @@ one index byte per `vec_size` samples — most IRQs need no bank switch.
 VQ compression ratio depends on vec_size: vec=2 gives ~1.9×, vec=4 gives
 ~3.8×, vec=8 gives ~7×, vec=16 gives ~12×. Larger vectors compress more
 but sacrifice quality.
+
+### VQ noise gate (`-g`)
+
+The `--gate` option controls a noise gate for VQ encoding (0–100%,
+default 5). It reserves one codebook entry for true silence and excludes
+vectors where every sample falls below the threshold from k-means
+training. The threshold scales with the gate value:
+
+    threshold = max_level × gate / 100
+
+For 2-channel mode (max_level=30): `-g 5` → threshold 1, `-g 20` →
+threshold 6, `-g 50` → threshold 15.
+
+| Value | Effect |
+|---|---|
+| `-g 0` | Gate off. All 256 codebook entries trained on actual data. Best for material with intentional quiet detail (fade-outs, ambient). |
+| `-g 5` (default) | Very mild. Snaps only near-zero vectors to silence. Cleans up digital silence without affecting audible content. |
+| `-g 20` | Moderate. Good for noisy sources with audible background hiss. |
+| `-g 50+` | Aggressive. Acts as a strong noise gate. May suppress quiet passages. |
 
 ### Perceptual enhancement (`-e`)
 
@@ -253,6 +278,7 @@ pokey-stream-player/
 ├── encode.exe       The standalone executable
 ├── mads.exe         MADS assembler (if found in bin/platform/)
 ├── README.md
+├── project-design.md
 └── LICENSE
 ```
 

@@ -23,9 +23,14 @@ cannot efficiently represent, degrading VQ SNR by ~3 dB.  Plain
 rounding produces vectors like [15,15,15,15] that get exact codebook
 matches.  Noise-shaped [14,16,15,14] gets poorly approximated.
 
-Codebook index 0 is ALWAYS reserved for silence, ensuring quiet
-sections play back as true silence and bank padding (zero bytes)
-decodes cleanly.  The remaining 255 entries are trained via k-means.
+Noise gate (``gate=1..100``):  Codebook index 0 is reserved for silence
+and vectors where every sample falls below ``max_level * gate / 100`` are
+excluded from training — they snap to true zero.  Higher values gate more
+aggressively.  Default is 5 (very mild, cleans up near-zero noise).
+
+No gate (``gate=0``):  All 256 entries are trained by k-means on the
+actual data.  A silence entry is still ensured (replacing the least-used
+code) so zero-padded bank tails decode cleanly.
 """
 
 import numpy as np
@@ -129,38 +134,31 @@ def _chunked_assign(vectors_f, codebook_f, chunk_size=50000):
     return out
 
 
-def _silence_threshold(max_level, vec_size):
-    """Determine per-sample threshold for near-silent vectors.
+def _gate_threshold(max_level, gate_pct):
+    """Per-sample threshold for noise gate.
+
+    Args:
+        max_level: Maximum POKEY index (depends on channel count).
+        gate_pct:  Gate strength 1–100 (percentage of max_level).
 
     A vector is "near-silent" if ALL its samples are <= this threshold.
-    Scales with max_level (which depends on pokey_channels) and vec_size:
-      - Higher max_level → wider dynamic range → slightly higher threshold
-      - Larger vec_size  → more samples must ALL be low → threshold can be
-        a bit more generous since random chance of all-low is tiny.
-
-    Returns per-sample threshold (integer).
+    Returns integer threshold (minimum 1 when gate is active).
     """
-    # Base threshold: ~7% of max_level, minimum 1
-    base = max(1, max_level // 15)
-    # Slight boost for larger vectors (harder for noise to be all-low)
-    if vec_size >= 16:
-        base = max(base, 2)
-    return base
+    return max(1, max_level * gate_pct // 100)
 
 
-def vq_encode_bank(indices, vec_size, max_level=30, n_iter=20):
+def vq_encode_bank(indices, vec_size, max_level=30, n_iter=20, gate=5):
     """Encode a chunk of POKEY indices into one VQ bank.
 
-    Codebook index 0 is ALWAYS reserved for the silence vector [0,0,...,0].
-    This guarantees:
-      - Perfect silence playback in quiet sections
-      - Clean padding at end of last bank (padding bytes = 0x00 = silence)
-      - No audible artifacts from zero-padded index data
+    ``gate`` controls noise gate strength (0–100, percentage of dynamic
+    range).  When ``gate > 0``, codebook index 0 is reserved for
+    ``[0,0,...,0]`` (silence) and vectors where every sample is below the
+    threshold are excluded from k-means training — they snap to true zero.
+    Higher values gate more aggressively.
 
-    The remaining 255 codebook entries are trained via k-means on the
-    actual signal vectors.  Near-silent vectors (all samples <= threshold)
-    are excluded from training and assigned to index 0, giving the
-    k-means 255 entries focused on the actual signal.
+    When ``gate == 0``, all 256 codebook entries are trained by k-means
+    on the actual data.  A silence entry is still ensured (replacing the
+    least-used code) so zero-padded bank tails decode cleanly.
 
     Returns:
         (bank_data, n_samples_encoded)
@@ -173,27 +171,38 @@ def vq_encode_bank(indices, vec_size, max_level=30, n_iter=20):
     used = n_vecs * vec_size
     vectors = indices[:used].reshape(n_vecs, vec_size)
 
-    # Separate near-silent vectors (train k-means only on non-silent)
-    thresh = _silence_threshold(max_level, vec_size)
-    near_silent_mask = np.all(vectors <= thresh, axis=1)
-    non_silent = vectors[~near_silent_mask]
+    if gate > 0:
+        # ── Gated mode: reserve index 0 for silence, train 255 codes ──
+        thresh = _gate_threshold(max_level, gate)
+        near_silent_mask = np.all(vectors <= thresh, axis=1)
+        non_silent = vectors[~near_silent_mask]
 
-    if len(non_silent) == 0:
-        # Entire chunk is near-silent: single silence entry suffices
-        codebook = np.zeros((N_CODES, vec_size), dtype=np.uint8)
-        assignments = np.zeros(n_vecs, dtype=np.uint8)
+        if len(non_silent) == 0:
+            codebook = np.zeros((N_CODES, vec_size), dtype=np.uint8)
+            assignments = np.zeros(n_vecs, dtype=np.uint8)
+        else:
+            cb_rest, _ = _kmeans(non_silent, n_codes=N_CODES - 1,
+                                 n_iter=n_iter, max_level=max_level)
+            codebook = np.zeros((N_CODES, vec_size), dtype=np.uint8)
+            codebook[1:N_CODES] = cb_rest[:N_CODES - 1]
+            assignments = _chunked_assign(
+                vectors.astype(np.float32), codebook.astype(np.float32))
     else:
-        # Train 255 codes on non-silent vectors (codebook[0] = silence)
-        cb_rest, _ = _kmeans(non_silent, n_codes=N_CODES - 1,
-                             n_iter=n_iter, max_level=max_level)
+        # ── Natural mode: k-means gets all 256 entries ────────────────
+        codebook, assignments = _kmeans(vectors, n_codes=N_CODES,
+                                        n_iter=n_iter, max_level=max_level)
 
-        # Build codebook: index 0 = silence, 1..255 = trained codes
-        codebook = np.zeros((N_CODES, vec_size), dtype=np.uint8)
-        codebook[1:N_CODES] = cb_rest[:N_CODES - 1]
-
-        # Final assignment: all vectors against full 256-entry codebook
-        assignments = _chunked_assign(
-            vectors.astype(np.float32), codebook.astype(np.float32))
+        # Ensure index 0 = silence so zero-padded bank tails are clean.
+        # Replace the least-used codebook entry.
+        silence = np.zeros(vec_size, dtype=np.uint8)
+        if not np.any(np.all(codebook == silence, axis=1)):
+            counts = np.bincount(assignments, minlength=N_CODES)
+            victim = int(np.argmin(counts))
+            codebook[victim] = silence
+            if counts[victim] > 0:
+                assignments = _chunked_assign(
+                    vectors.astype(np.float32),
+                    codebook.astype(np.float32))
 
     cb_bytes = N_CODES * vec_size
     bank = bytearray(cb_bytes + n_vecs)
@@ -210,11 +219,12 @@ def vq_encode_bank(indices, vec_size, max_level=30, n_iter=20):
 
 
 def vq_encode_banks(indices, vec_size=8, max_banks=64,
-                    max_level=30, n_iter=20, progress_fn=None):
+                    max_level=30, n_iter=20, gate=5, progress_fn=None):
     """Encode all POKEY indices into VQ banks with per-bank codebooks.
 
     Args:
         indices: POKEY level indices (bytes or numpy array)
+        gate: Noise gate strength 0–100 (0 = off, default 5).
 
     Returns:
         (banks, samples_encoded)
@@ -241,7 +251,7 @@ def vq_encode_banks(indices, vec_size=8, max_banks=64,
 
         chunk = indices[pos:pos + chunk_size]
         bank_data, n_encoded = vq_encode_bank(
-            chunk, vec_size, max_level, n_iter)
+            chunk, vec_size, max_level, n_iter, gate=gate)
 
         # Pad bank to BANK_SIZE
         if len(bank_data) < BANK_SIZE:
