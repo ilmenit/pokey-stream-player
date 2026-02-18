@@ -28,17 +28,17 @@ Running without arguments shows the full help screen.
 ### Examples
 
 ```bash
-# Basic: convert MP3 to XEX (default: 2ch, DeltaLZ compressed)
+# Basic: convert MP3 to XEX (default: VQ4, 2ch, 8kHz)
 ./encode.sh song.mp3
 
 # Perceptual enhancement — better on real hardware
 ./encode.sh song.mp3 -e
 
-# VQ compression — fits ~7x more audio (lossy, ~-3dB)
-./encode.sh song.mp3 -c vq
+# VQ with smallest vectors — highest quality, least compression
+./encode.sh song.mp3 -s 2
 
-# VQ + enhanced — best quality per byte on real Atari
-./encode.sh song.mp3 -c vq -e
+# DeltaLZ compression (lossless, lower compression ratio)
+./encode.sh song.mp3 -c lz
 
 # No compression (fastest encode, least audio fits)
 ./encode.sh song.mp3 -c off
@@ -52,36 +52,63 @@ Running without arguments shows the full help screen.
 # Lower sample rate = longer recording fits in memory
 ./encode.sh song.mp3 -r 6000
 
-# Generate MADS assembly project (for manual builds / customization)
-./encode.sh song.mp3 --asm -o my_project
+# Generate assembly project alongside the XEX
+./encode.sh song.mp3 -a
 
+# Assembly project only (no XEX)
+./encode.sh song.mp3 --no-xex -a -o my_project
 ```
 
 ### Options
 
-| Option | Description |
-|---|---|
-| `-c off\|lz\|vq` | Compression mode (default: lz). See below. |
-| `-s N` | VQ vector size: 4, 8, 16 (default: 8). Only with `-c vq`. |
-| `-n N` | POKEY channels: 1–4 (default: 2). More = louder but rougher. |
-| `-e, --enhance` | Treble pre-emphasis for real hardware. See below. |
-| `-o FILE` | Output .xex file or directory for `--asm`. Default: `<input>.xex` |
-| `-r RATE` | Sample rate in Hz (default: 8000). Lower = longer duration. |
-| `--asm` | Output a MADS assembly project instead of a ready XEX. |
-| `--max-banks N` | Max extended memory banks (default: 64 = 1MB). |
-| `-v` | Verbose — shows compression verification. |
+**Output targets:**
+
+| Option | Default | Description |
+|---|---|---|
+| `-x, --xex` | ON | Generate .xex binary. |
+| `--no-xex` | — | Skip .xex generation. Mutually exclusive with `-x`. |
+| `-a, --asm` | OFF | Generate assembly project (compatible with MADS assembler). |
+| `-o, --output FILE` | `outputs/<input>` | Output base name. Adds `.xex` and/or `_asm` suffix automatically. |
+
+**Compression:**
+
+| Option | Default | Description |
+|---|---|---|
+| `-c, --compression {off,lz,vq}` | `vq` | Compression mode. `vq` = Vector Quantization (lossy, high ratio), `lz` = DeltaLZ (lossless), `off` = raw samples. |
+| `-s, --vec-size {2,4,8,16}` | `4` | VQ vector size. Smaller = better quality, less compression. Only used with `-c vq`. |
+
+**Audio:**
+
+| Option | Default | Description |
+|---|---|---|
+| `-r, --rate RATE` | `8000` | Sample rate in Hz. Lower = longer duration, less treble. |
+| `-n, --channels {1,2,3,4}` | `2` | POKEY channels. More = louder but rougher. |
+| `-e, --enhance` | OFF | Treble pre-emphasis to compensate POKEY DAC rolloff. See below. |
+| `--mode {scalar,1cps}` | `scalar` | LZ encoding mode. `scalar` = multi-channel writes per IRQ. `1cps` = single write per IRQ (for 12+ kHz rates). Only used with `-c lz`. |
+
+**Advanced:**
+
+| Option | Default | Description |
+|---|---|---|
+| `--max-banks N` | `64` | Max extended memory banks (64 = 1MB). |
+| `--no-noise-shaping` | OFF | Disable noise shaping. Slightly faster, lower quality. |
+| `-v, --verbose` | OFF | Show compression verification details. |
 
 ### Compression modes
 
 | Mode | Ratio | Quality | Description |
 |---|---|---|---|
+| `vq` (default) | ~3.8× (vec=4) | -1 dB | Vector Quantization with per-bank codebook |
 | `lz` (DeltaLZ) | ~1.3× | Lossless | Delta encoding + LZ compression |
-| `vq` | ~7× (vec=8) | -3 dB | Vector Quantization with per-bank codebook |
 | `off` | 1× | Lossless | Raw sample stream, no compression |
 
 VQ uses 256-entry codebooks trained per bank via k-means. Each codebook
 index selects a fixed-length vector of samples, so the player only reads
 one index byte per `vec_size` samples — most IRQs need no bank switch.
+
+VQ compression ratio depends on vec_size: vec=2 gives ~1.9×, vec=4 gives
+~3.8×, vec=8 gives ~7×, vec=16 gives ~12×. Larger vectors compress more
+but sacrifice quality.
 
 ### Perceptual enhancement (`-e`)
 
@@ -98,6 +125,20 @@ Uses a short (15-tap) FIR filter at 70% strength — the measured sweet
 spot that improves 1-3 kHz SNR by +0.7 dB with zero increase in
 quantization artifacts. Encode-time only; the player code is unchanged.
 
+### Assembly and MADS
+
+The `--asm` flag outputs a complete assembly project that can be built
+with the [MADS](https://mads.atari8.info/) assembler:
+
+```bash
+mads stream_player.asm -o:output.xex
+```
+
+When generating a `.xex`, the tool first looks for MADS in the project
+folder and system PATH. If found, it uses MADS. If not, it falls back
+to the built-in assembler (a MADS-compatible subset). The method used is
+shown in the output: `[mads]` or `[built-in]`.
+
 ### Audio formats
 
 WAV, MP3, FLAC, OGG/Vorbis, and AIFF are handled by the `soundfile`
@@ -108,16 +149,12 @@ Tracker formats (MOD, XM, S3M, IT) require [ffmpeg](https://ffmpeg.org).
 
 At 8 kHz mono (1 byte per sample = 8 KB/s):
 
-| Memory | Raw | DeltaLZ (~1.3×) | VQ vec=8 (~7×) |
-|---|---|---|---|
-| 130XE stock (64KB) | ~8s | ~10s | ~57s |
-| 256KB expanded | ~32s | ~42s | ~3:48 |
-| 512KB expanded | ~1:05 | ~1:25 | ~7:36 |
-| 1MB expanded | ~2:11 | ~2:50 | ~15:12 |
-
-VQ compression ratio depends on vec_size: vec=4 gives ~3.8×, vec=8 gives
-~7×, vec=16 gives ~12×. Larger vectors compress more but sacrifice quality
-(RMSE increases from ~0.5 to ~0.7 levels on a 31-level scale).
+| Memory | Raw | DeltaLZ (~1.3×) | VQ vec=4 (~3.8×) | VQ vec=8 (~7×) |
+|---|---|---|---|---|
+| 130XE stock (64KB) | ~8s | ~10s | ~30s | ~57s |
+| 256KB expanded | ~32s | ~42s | ~2:01 | ~3:48 |
+| 512KB expanded | ~1:05 | ~1:25 | ~4:06 | ~7:36 |
+| 1MB expanded | ~2:11 | ~2:50 | ~8:18 | ~15:12 |
 
 Lower the sample rate (`-r 6000`) for longer recordings at the cost of
 reduced high-frequency content.
@@ -140,9 +177,9 @@ voltages (hardware limitation — registers can't be written atomically).
 The encoder quantizes audio to N-channel POKEY voltage levels using a
 single-step allocation table (each consecutive level changes exactly one
 AUDC register), applies noise shaping to push quantization error above the
-audible range, then compresses the stream with DeltaLZ. The Atari player
-decompresses in real-time inside the POKEY timer IRQ handler — no double
-buffering, no audio gaps.
+audible range, then compresses the stream with VQ or DeltaLZ. The Atari
+player decompresses in real-time inside the POKEY timer IRQ handler — no
+double buffering, no audio gaps.
 
 ## Project structure
 
@@ -152,6 +189,7 @@ stream-player/
 ├── encode.bat          Windows launcher
 ├── requirements.txt    Python dependencies (numpy, scipy, soundfile)
 ├── README.md
+├── asm/                Static assembly templates (copied into projects)
 ├── src/
 │   └── stream_player/  Python package
 │       ├── cli.py          Command-line interface
@@ -160,12 +198,16 @@ stream-player/
 │       ├── tables.py       POKEY voltage tables & quantization
 │       ├── compress.py     DeltaLZ compressor/decompressor
 │       ├── vq.py           VQ encoder/decoder (per-bank codebook)
-│       ├── player_code.py  6502 machine code generator
-│       ├── asm_output.py   MADS assembly project generator
-│       ├── asm6502.py      Minimal 6502 assembler
-│       ├── xex.py          Atari XEX binary builder
 │       ├── layout.py       Bank memory layout
-│       └── errors.py       Exception classes
+│       ├── asm_project.py  Assembly project generator + MADS/built-in dispatch
+│       ├── errors.py       Exception classes
+│       └── simple_mads/    Built-in MADS-compatible 6502 assembler
+│           ├── parser.py       Phase 1: source → flat statement list
+│           ├── assembler.py    Phase 2-3: resolve symbols → emit XEX
+│           ├── expressions.py  Expression evaluator (arithmetic, lo/hi byte)
+│           ├── encoder.py      6502 instruction encoder (all addressing modes)
+│           ├── opcodes.py      Opcode table (56 instructions × all modes)
+│           └── xex.py          Atari XEX binary format builder
 └── tests/
     └── test_stream_player.py
 ```
