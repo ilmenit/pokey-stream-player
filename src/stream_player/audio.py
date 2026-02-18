@@ -6,11 +6,8 @@ import wave
 import numpy as np
 import scipy.signal
 
-from .errors import AudioLoadError, EncodingError
-from .tables import (quantize_single, quantize_dual, quantize_quad,
-                     quantize_nch, quantize_1cps, pack_dual_byte,
-                     VOLTAGE_TABLE_SINGLE, VOLTAGE_TABLE_DUAL, VOLTAGE_TABLE_QUAD,
-                     n_levels)
+from .errors import AudioLoadError
+from .tables import quantize_dual, quantize_nch, quantize_1cps
 
 # PAL POKEY base clock
 PAL_CLOCK = 1773447
@@ -308,104 +305,57 @@ def find_best_divisor(target_rate: float) -> tuple:
     return div, rate, 0x00
 
 
+def _pack_dual_indices(indices):
+    """Vectorized dual-channel packing: index → (v1<<4)|v2 byte.
+
+    Balanced split: v1 = idx // 2, v2 = idx - v1.
+    """
+    v1 = indices // 2
+    v2 = indices - v1
+    return (v1.astype(np.uint8) << 4) | v2.astype(np.uint8)
+
+
 def encode_mono_dual(audio: np.ndarray, noise_shaping: bool = True,
                      sample_rate: int = 8000) -> bytes:
     """Encode mono audio for dual-POKEY playback (31 levels).
-    
+
     Each sample → 1 byte: (v1 << 4) | v2 where v1+v2 produces
     the target amplitude via POKEY's non-linear mixing.
-    
-    Output: 1 byte per sample (no nibble packing needed).
     """
     if audio.ndim > 1:
-        audio = audio.mean(axis=1)  # Mix to mono
-    
+        audio = audio.mean(axis=1)
+
     audio = dc_block(audio, cutoff_hz=20.0, sample_rate=sample_rate)
     audio = normalize(audio)
     audio = np.clip(audio, -1.0, 1.0)
     indices = quantize_dual(audio, noise_shaping)
-    
-    # Convert indices to packed (v1<<4)|v2 bytes
-    out = bytearray(len(indices))
-    for i, idx in enumerate(indices):
-        out[i] = pack_dual_byte(idx)
-    return bytes(out)
+    return bytes(_pack_dual_indices(indices))
 
 
 def encode_stereo_dual(audio: np.ndarray, noise_shaping: bool = True,
                        sample_rate: int = 8000) -> bytes:
     """Encode stereo audio for dual-POKEY playback.
-    
+
     Left channel → POKEY1 (AUDC1 + AUDC2, 31 levels)
     Right channel → POKEY2 (AUDC1 + AUDC2, 31 levels)
-    
+
     Output: 2 bytes per sample (left_packed, right_packed).
     """
     if audio.ndim == 1:
-        # Mono → duplicate to stereo
         audio = np.column_stack([audio, audio])
     elif audio.shape[1] > 2:
         audio = audio[:, :2]
-    
+
     audio = dc_block(audio, cutoff_hz=20.0, sample_rate=sample_rate)
     audio = normalize(audio)
     audio = np.clip(audio, -1.0, 1.0)
     left_idx = quantize_dual(audio[:, 0], noise_shaping)
     right_idx = quantize_dual(audio[:, 1], noise_shaping)
-    
-    out = bytearray(len(left_idx) * 2)
-    for i in range(len(left_idx)):
-        out[i * 2] = pack_dual_byte(left_idx[i])
-        out[i * 2 + 1] = pack_dual_byte(right_idx[i])
+
+    out = np.empty(len(left_idx) * 2, dtype=np.uint8)
+    out[0::2] = _pack_dual_indices(left_idx)
+    out[1::2] = _pack_dual_indices(right_idx)
     return bytes(out)
-
-
-def encode_audio(audio: np.ndarray, n_channels: int, stereo: bool,
-                 noise_shaping: bool = True, sample_rate: int = 8000,
-                 pokey_channels: int = 4, enhance: bool = False) -> bytes:
-    """Encode audio to POKEY byte stream (N-channel for RAW mode).
-
-    Each sample → 1 byte: channel index (0 to 15*pokey_channels).
-    The RAW player uses this as an index into AUDC lookup tables.
-
-    Args:
-        audio: float32 array from load_audio
-        n_channels: original channel count
-        stereo: True for stereo dual-POKEY output
-        noise_shaping: Use noise shaping for better quality
-        sample_rate: sample rate (for HPF)
-        pokey_channels: Number of POKEY channels (1-4)
-        enhance: Apply perceptual enhancement (dynamics + pre-emphasis)
-
-    Returns:
-        Encoded byte stream (1 byte per sample)
-    """
-    if audio.ndim > 1 and (not stereo or n_channels < 2):
-        audio = audio.mean(axis=1)
-
-    audio = dc_block(audio, cutoff_hz=20.0, sample_rate=sample_rate)
-    audio = normalize(audio)
-
-    if enhance:
-        from .enhance import enhance_audio as _enhance
-        audio = _enhance(audio, sample_rate)
-        audio = normalize(audio)  # re-normalize after boost
-
-    audio = np.clip(audio, -1.0, 1.0)
-
-    qfn = _make_quantizer(pokey_channels, noise_shaping, enhance)
-
-    if stereo and audio.ndim > 1:
-        left_idx = qfn(audio[:, 0])
-        right_idx = qfn(audio[:, 1])
-        out = np.empty(len(left_idx) * 2, dtype=np.uint8)
-        out[0::2] = left_idx
-        out[1::2] = right_idx
-        return bytes(out)
-    else:
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        return bytes(qfn(audio))
 
 
 def normalize(audio: np.ndarray, headroom_db: float = 0.5) -> np.ndarray:
@@ -432,40 +382,16 @@ def normalize(audio: np.ndarray, headroom_db: float = 0.5) -> np.ndarray:
     return audio  # already loud enough
 
 
-def _make_quantizer(pokey_channels, noise_shaping, enhance):
-    """Create quantization function based on settings.
-
-    Note: 2nd-order noise shaping (quantize_shaped2) is available in
-    enhance.py but measurements show 1st-order is better at 8 kHz
-    because the 4 kHz Nyquist leaves no room to push noise out of
-    the audible band. The real perceptual gain comes from dynamics
-    compression and ZOH pre-emphasis, not from the noise shaper.
-    """
+def _make_quantizer(pokey_channels, noise_shaping, mode='scalar'):
+    """Create quantization function based on settings."""
+    if mode == '1cps':
+        return lambda audio: quantize_1cps(audio, noise_shaping)
     return lambda audio: quantize_nch(audio, pokey_channels, noise_shaping)
 
 
-def encode_indices(audio: np.ndarray, n_channels: int, stereo: bool,
-                   noise_shaping: bool = True, sample_rate: int = 8000,
-                   pokey_channels: int = 4, mode: str = '1cps',
-                   enhance: bool = False) -> bytes:
-    """Encode audio to POKEY index stream (for DeltaLZ/VQ compression).
-
-    Returns raw quantization indices instead of packed bytes.
-    The compressor delta-encodes these for much better compression.
-
-    Args:
-        audio: float32 array from load_audio
-        n_channels: original channel count
-        stereo: True for stereo dual-POKEY output
-        noise_shaping: Use noise shaping for better quality
-        sample_rate: sample rate (for HPF)
-        pokey_channels: 2 for dual-channel (31 levels), 4 for quad (61 levels)
-        mode: '1cps' for 1-Channel-Per-Sample, 'scalar' for legacy scalar
-        enhance: Apply perceptual enhancement (dynamics + pre-emphasis)
-
-    Returns:
-        Byte stream of indices (per sample, or 2 per sample for stereo)
-    """
+def _preprocess(audio, n_channels, stereo, noise_shaping, sample_rate,
+                enhance):
+    """Shared preprocessing: mix, dc_block, normalize, enhance, clip."""
     if audio.ndim > 1 and (not stereo or n_channels < 2):
         audio = audio.mean(axis=1)
 
@@ -475,15 +401,13 @@ def encode_indices(audio: np.ndarray, n_channels: int, stereo: bool,
     if enhance:
         from .enhance import enhance_audio as _enhance
         audio = _enhance(audio, sample_rate)
-        audio = normalize(audio)  # re-normalize after boost
+        audio = normalize(audio)
 
-    audio = np.clip(audio, -1.0, 1.0)
+    return np.clip(audio, -1.0, 1.0)
 
-    if mode == '1cps':
-        qfn = lambda audio: quantize_1cps(audio, noise_shaping)
-    else:
-        qfn = _make_quantizer(pokey_channels, noise_shaping, enhance)
 
+def _quantize_and_pack(audio, stereo, qfn):
+    """Apply quantizer, handle stereo interleaving."""
     if stereo and audio.ndim > 1:
         left_idx = qfn(audio[:, 0])
         right_idx = qfn(audio[:, 1])
@@ -491,7 +415,33 @@ def encode_indices(audio: np.ndarray, n_channels: int, stereo: bool,
         out[0::2] = left_idx
         out[1::2] = right_idx
         return bytes(out)
-    else:
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        return bytes(qfn(audio))
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    return bytes(qfn(audio))
+
+
+def encode_audio(audio: np.ndarray, n_channels: int, stereo: bool,
+                 noise_shaping: bool = True, sample_rate: int = 8000,
+                 pokey_channels: int = 4, enhance: bool = False) -> bytes:
+    """Encode audio to POKEY byte stream (N-channel for RAW mode).
+
+    Each sample → 1 byte: channel index (0 to 15*pokey_channels).
+    """
+    audio = _preprocess(audio, n_channels, stereo, noise_shaping,
+                        sample_rate, enhance)
+    qfn = _make_quantizer(pokey_channels, noise_shaping)
+    return _quantize_and_pack(audio, stereo, qfn)
+
+
+def encode_indices(audio: np.ndarray, n_channels: int, stereo: bool,
+                   noise_shaping: bool = True, sample_rate: int = 8000,
+                   pokey_channels: int = 4, mode: str = '1cps',
+                   enhance: bool = False) -> bytes:
+    """Encode audio to POKEY index stream (for DeltaLZ/VQ compression).
+
+    Like encode_audio but supports 1CPS mode selection.
+    """
+    audio = _preprocess(audio, n_channels, stereo, noise_shaping,
+                        sample_rate, enhance)
+    qfn = _make_quantizer(pokey_channels, noise_shaping, mode)
+    return _quantize_and_pack(audio, stereo, qfn)

@@ -1,12 +1,18 @@
-"""stream-player: Convert audio to Atari XEX with 4-channel POKEY playback.
+"""stream-player: Convert audio to Atari XEX with POKEY PCM playback.
 
 Supports:
   - Any audio format (via soundfile: MP3, FLAC, OGG, WAV, AIFF)
-  - 1CPS encoding (1-Channel-Per-Sample, zero wobble, 95-cycle IRQ)
-  - Scalar encoding (legacy 4-register writes, 122-cycle IRQ)
-  - Extended memory banking (up to 64 banks = 1MB)
+  - 1-4 POKEY channel configurations (16-61 quantization levels)
+  - VQ compression (vector quantization, ~4x, default)
+  - DeltaLZ compression (lossless, ~1.3x)
   - RAW mode (uncompressed streaming from banks)
-  - Compressed mode (LZ streaming with real-time 6502 decompression)
+  - Extended memory banking (up to 64 banks = 1MB)
+  - Assembly project generation (all modes)
+
+Architecture:
+  Python encoder generates per-song data files (.asm).
+  Static hand-written .asm files contain all player logic.
+  Built-in assembler produces the final .xex binary.
 """
 
-__version__ = '2.0.0'
+__version__ = '3.2.0'

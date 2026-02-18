@@ -75,7 +75,11 @@ def n_levels(n_channels):
 VOLTAGE_TABLE_QUAD, _QUAD_ALLOC = build_nch_table(4)
 QUAD_MAX_LEVEL = max_level(4)  # 60
 
-# Legacy dual-channel table (balanced split, used by old encode_mono_dual)
+# Legacy dual-channel voltage table for encode_mono_dual.
+# Uses BALANCED SPLIT allocation (v1 = idx//2, v2 = idx - v1) which differs
+# from build_nch_table(2)'s single-step strategy. Both are valid but produce
+# different channel distributions. This table is required for pack_dual_byte
+# compatibility — the packed (v1<<4)|v2 byte assumes this specific split.
 VOLTAGE_TABLE_DUAL = np.array([
     0.000000, 0.032677, 0.065354, 0.101298, 0.137242, 0.169919,
     0.202596, 0.245076, 0.287556, 0.320232, 0.352909, 0.388853,

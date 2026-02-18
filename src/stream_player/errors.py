@@ -17,7 +17,7 @@ class EncodingError(StreamPlayerError):
 
 
 class CompressionError(StreamPlayerError):
-    """LZSA compression failed."""
+    """DeltaLZ or VQ compression failed."""
     pass
 
 
